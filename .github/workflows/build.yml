@@ -16,7 +16,6 @@ jobs:
         run: |
           mkdir -p output
 
-          # 写入集成 UI 开关、日志导出与全方位 Hook 的纯原生 Objective-C 代码
           cat << 'EOF' > Tweak.m
           #import <Foundation/Foundation.h>
           #import <UIKit/UIKit.h>
@@ -31,7 +30,7 @@ jobs:
           static dispatch_queue_t gTranslateQueue = nil;
 
           static NSString *const kPrefAutoTranslateEnabled = @"XAutoTranslate_Enabled";
-          static NSString *const kPrefTranslationMode = @"XAutoTranslate_Mode"; // 0: 原文+译文, 1: 仅译文
+          static NSString *const kPrefTranslationMode = @"XAutoTranslate_Mode";
 
           static void XLog(NSString *format, ...) {
               va_list args;
@@ -55,33 +54,34 @@ jobs:
 
           static BOOL IsAutoTranslateEnabled(void) {
               id val = [[NSUserDefaults standardUserDefaults] objectForKey:kPrefAutoTranslateEnabled];
-              return val ? [val boolValue] : YES; // 默认开启
+              return val ? [val boolValue] : YES;
           }
 
           static NSInteger GetTranslationMode(void) {
               return [[NSUserDefaults standardUserDefaults] integerForKey:kPrefTranslationMode];
           }
 
-          // 刷新当前屏幕上的所有列表，强制重绘译文
-          static void RefreshVisibleTimeline(void) {
-              dispatch_async(dispatch_get_main_queue(), ^{
-                  UIWindow *window = nil;
-                  for (UIWindow *w in [UIApplication sharedApplication].windows) {
-                      if (w.isKeyWindow) { window = w; break; }
-                  }
-                  if (!window) window = [UIApplication sharedApplication].windows.firstObject;
+          // 遍历并重载屏幕上所有集合与列表视图
+          static void ReloadAllTimelineViews(UIView *view) {
+              if (!view) return;
+              if ([view isKindOfClass:[UICollectionView class]]) {
+                  [((UICollectionView *)view) reloadData];
+              } else if ([view isKindOfClass:[UITableView class]]) {
+                  [((UITableView *)view) reloadData];
+              }
+              for (UIView *sub in view.subviews) {
+                  ReloadAllTimelineViews(sub);
+              }
+          }
 
-                  void (^__block findAndReload)(UIView *) = ^(UIView *view) {
-                      if ([view isKindOfClass:[UICollectionView class]]) {
-                          [((UICollectionView *)view) reloadData];
-                      } else if ([view isKindOfClass:[UITableView class]]) {
-                          [((UITableView *)view) reloadData];
-                      }
-                      for (UIView *sub in view.subviews) {
-                          findAndReload(sub);
-                      }
-                  };
-                  if (window) findAndReload(window);
+          static void TriggerTimelineRefresh(void) {
+              dispatch_async(dispatch_get_main_queue(), ^{
+                  UIWindow *targetWindow = nil;
+                  for (UIWindow *w in [UIApplication sharedApplication].windows) {
+                      if (w.isKeyWindow) { targetWindow = w; break; }
+                  }
+                  if (!targetWindow) targetWindow = [UIApplication sharedApplication].windows.firstObject;
+                  if (targetWindow) ReloadAllTimelineViews(targetWindow);
               });
           }
 
@@ -94,12 +94,15 @@ jobs:
                   [gPendingRequests addObject:statusID];
               }
 
-              XLog(@"发起翻译 -> 推文ID: %@, 内容: %.25@...", statusID, text);
+              XLog(@"发起翻译 -> ID: %@, 原文: %.25@...", statusID, text);
 
               dispatch_async(gTranslateQueue, ^{
-                  NSString *encodedText = [text stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
-                  NSString *urlString = [NSString stringWithFormat:@"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=%@", encodedText];
+                  // 转义 URLQuery 允许的特殊字符，避免 # 话题标签和 & 符号截断 URL
+                  NSMutableCharacterSet *allowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
+                  [allowed removeCharactersInString:@"#+&?="];
+                  NSString *encodedText = [text stringByAddingPercentEncodingWithAllowedCharacters:allowed];
                   
+                  NSString *urlString = [NSString stringWithFormat:@"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=%@", encodedText];
                   NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlString]];
                   [request setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X)" forHTTPHeaderField:@"User-Agent"];
                   request.timeoutInterval = 8.0;
@@ -110,13 +113,13 @@ jobs:
                       }
 
                       if (error) {
-                          XLog(@"[失败] 网络错误: %@ (请检查 VPN/节点对 translate.googleapis.com 的分流)", error.localizedDescription);
+                          XLog(@"[请求异常] 网络错误: %@ (请确认代理分流设置)", error.localizedDescription);
                           return;
                       }
 
                       NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
                       if (httpResp.statusCode != 200) {
-                          XLog(@"[失败] Google 接口返回状态码: %ld", (long)httpResp.statusCode);
+                          XLog(@"[接口返回非200] 状态码: %ld", (long)httpResp.statusCode);
                           return;
                       }
 
@@ -135,12 +138,12 @@ jobs:
                           }
 
                           if (translatedFull.length > 0) {
-                              XLog(@"[成功] 译文获取完毕: %.30@...", translatedFull);
+                              XLog(@"[翻译成功] ID: %@ -> 译文: %.30@...", statusID, translatedFull);
                               [gTranslationCache setObject:[translatedFull copy] forKey:statusID];
-                              RefreshVisibleTimeline();
+                              TriggerTimelineRefresh();
                           }
                       } else {
-                          XLog(@"[解析失败] 返回数据格式不符合预期");
+                          XLog(@"[解析失败] 数据格式无法解析");
                       }
                   }];
                   [task resume];
@@ -156,7 +159,7 @@ jobs:
               if (cached) {
                   if ([cached isEqualToString:orig]) return orig;
                   if (GetTranslationMode() == 1) {
-                      return cached; // 仅译文
+                      return cached; // 纯中文模式
                   }
                   return [NSString stringWithFormat:@"%@\n\n🇨🇳 [自动翻译]\n%@", orig, cached];
               }
@@ -180,6 +183,16 @@ jobs:
               return ProcessTranslatedText(orig, sid);
           }
 
+          static NSString *(*orig_status_displayText)(id, SEL) = NULL;
+          static NSString *hook_status_displayText(id self, SEL _cmd) {
+              NSString *orig = orig_status_displayText ? orig_status_displayText(self, _cmd) : nil;
+              NSString *sid = nil;
+              if ([self respondsToSelector:@selector(statusIDString)]) {
+                  sid = ((NSString *(*)(id, SEL))objc_msgSend)(self, @selector(statusIDString));
+              }
+              return ProcessTranslatedText(orig, sid);
+          }
+
           static NSString *(*orig_vm_primaryText)(id, SEL) = NULL;
           static NSString *hook_vm_primaryText(id self, SEL _cmd) {
               NSString *orig = orig_vm_primaryText ? orig_vm_primaryText(self, _cmd) : nil;
@@ -193,17 +206,32 @@ jobs:
               return ProcessTranslatedText(orig, sid);
           }
 
-          static void HookInstanceMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
+          static NSString *(*orig_vm_displayText)(id, SEL) = NULL;
+          static NSString *hook_vm_displayText(id self, SEL _cmd) {
+              NSString *orig = orig_vm_displayText ? orig_vm_displayText(self, _cmd) : nil;
+              NSString *sid = nil;
+              if ([self respondsToSelector:@selector(status)]) {
+                  id status = ((id (*)(id, SEL))objc_msgSend)(self, @selector(status));
+                  if (status && [status respondsToSelector:@selector(statusIDString)]) {
+                      sid = ((NSString *(*)(id, SEL))objc_msgSend)(status, @selector(statusIDString));
+                  }
+              }
+              return ProcessTranslatedText(orig, sid);
+          }
+
+          static void HookMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
               if (!cls) return;
               Method m = class_getInstanceMethod(cls, sel);
               if (m) {
                   *origImp = method_getImplementation(m);
                   method_setImplementation(m, newImp);
-                  XLog(@"[Hook成功] 类: %@, 方法: %@", NSStringFromClass(cls), NSStringFromSelector(sel));
+                  XLog(@"[Hook成功] %@ -> %@", NSStringFromClass(cls), NSStringFromSelector(sel));
               }
           }
 
-          // ==================== 悬浮球 & 设置日志菜单 ====================
+          // ==================== 悬浮球 & 菜单 ====================
+          static void ShowSettingsMenu(void);
+
           @interface XFloatBtn : UIButton
           @property (nonatomic, assign) CGPoint startPoint;
           @end
@@ -220,22 +248,25 @@ jobs:
               CGPoint cur = [t locationInView:self.superview];
               self.center = CGPointMake(cur.x, cur.y);
           }
+          - (void)onButtonClicked {
+              ShowSettingsMenu();
+          }
           @end
 
-          static void ShowLogViewerController(UIViewController *rootVC) {
+          static void ShowLogViewer(UIViewController *rootVC) {
               [gLogLock lock];
               NSString *fullLog = [gLogList componentsJoinedByString:@"\n"];
               [gLogLock unlock];
 
               UIAlertController *logAlert = [UIAlertController alertControllerWithTitle:@"运行日志"
-                                                                                message:fullLog.length > 0 ? fullLog : @"(暂无日志记录)"
+                                                                                message:fullLog.length > 0 ? fullLog : @"(暂无日志)"
                                                                          preferredStyle:UIAlertControllerStyleAlert];
 
-              [logAlert addAction:[UIAlertAction actionWithAction:@"一键复制" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+              [logAlert addAction:[UIAlertAction actionWithTitle:@"一键复制" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
                   [UIPasteboard generalPasteboard].string = fullLog;
               }]];
 
-              [logAlert addAction:[UIAlertAction actionWithAction:@"导出为 TXT 文件" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+              [logAlert addAction:[UIAlertAction actionWithTitle:@"导出为 TXT 文件" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
                   NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"XAutoTranslate.log"];
                   [fullLog writeToFile:tmpPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
                   NSURL *fileURL = [NSURL fileURLWithPath:tmpPath];
@@ -243,48 +274,56 @@ jobs:
                   [rootVC presentViewController:actVC animated:YES completion:nil];
               }]];
 
-              [logAlert addAction:[UIAlertAction actionWithAction:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
+              [logAlert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
               [rootVC presentViewController:logAlert animated:YES completion:nil];
           }
 
           static void ShowSettingsMenu(void) {
-              UIViewController *topVC = [UIApplication sharedApplication].keyWindow.rootViewController;
-              while (topVC.presentedViewController) topVC = topVC.presentedViewController;
+              dispatch_async(dispatch_get_main_queue(), ^{
+                  UIWindow *window = nil;
+                  for (UIWindow *w in [UIApplication sharedApplication].windows) {
+                      if (w.isKeyWindow) { window = w; break; }
+                  }
+                  if (!window) window = [UIApplication sharedApplication].windows.firstObject;
+                  UIViewController *topVC = window.rootViewController;
+                  while (topVC.presentedViewController) topVC = topVC.presentedViewController;
+                  if (!topVC) return;
 
-              BOOL isEnabled = IsAutoTranslateEnabled();
-              NSInteger curMode = GetTranslationMode();
+                  BOOL isEnabled = IsAutoTranslateEnabled();
+                  NSInteger curMode = GetTranslationMode();
 
-              NSString *title = [NSString stringWithFormat:@"自动翻译设置 (当前状态: %@)", isEnabled ? @"✅ 开启" : @"❌ 关闭"];
-              UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
-                                                                             message:@"可在此切换翻译工作状态与查看抓包日志"
-                                                                      preferredStyle:UIAlertControllerStyleActionSheet];
+                  NSString *title = [NSString stringWithFormat:@"自动翻译设置 (当前: %@)", isEnabled ? @"✅ 开启" : @"❌ 关闭"];
+                  UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                                 message:@"可调整翻译显示模式或查看排查日志"
+                                                                          preferredStyle:UIAlertControllerStyleActionSheet];
 
-              [alert addAction:[UIAlertAction actionWithAction:(isEnabled ? @"暂停自动翻译" : @"开启自动翻译")
-                                                         style:UIAlertActionStyleDefault
-                                                       handler:^(UIAlertAction *action) {
-                  [[NSUserDefaults standardUserDefaults] setBool:!isEnabled forKey:kPrefAutoTranslateEnabled];
-                  [[NSUserDefaults standardUserDefaults] synchronize];
-                  RefreshVisibleTimeline();
-              }]];
+                  [alert addAction:[UIAlertAction actionWithTitle:(isEnabled ? @"暂停自动翻译" : @"开启自动翻译")
+                                                             style:UIAlertActionStyleDefault
+                                                           handler:^(UIAlertAction * _Nonnull action) {
+                      [[NSUserDefaults standardUserDefaults] setBool:!isEnabled forKey:kPrefAutoTranslateEnabled];
+                      [[NSUserDefaults standardUserDefaults] synchronize];
+                      TriggerTimelineRefresh();
+                  }]];
 
-              [alert addAction:[UIAlertAction actionWithAction:(curMode == 0 ? @"切换为：仅显示译文" : @"切换为：原文+译文双语")
-                                                         style:UIAlertActionStyleDefault
-                                                       handler:^(UIAlertAction *action) {
-                  [[NSUserDefaults standardUserDefaults] setInteger:(curMode == 0 ? 1 : 0) forKey:kPrefTranslationMode];
-                  [[NSUserDefaults standardUserDefaults] synchronize];
-                  RefreshVisibleTimeline();
-              }]];
+                  [alert addAction:[UIAlertAction actionWithTitle:(curMode == 0 ? @"切换为：仅显示译文" : @"切换为：原文+译文双语")
+                                                             style:UIAlertActionStyleDefault
+                                                           handler:^(UIAlertAction * _Nonnull action) {
+                      [[NSUserDefaults standardUserDefaults] setInteger:(curMode == 0 ? 1 : 0) forKey:kPrefTranslationMode];
+                      [[NSUserDefaults standardUserDefaults] synchronize];
+                      TriggerTimelineRefresh();
+                  }]];
 
-              [alert addAction:[UIAlertAction actionWithAction:@"强制刷新当前界面" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                  RefreshVisibleTimeline();
-              }]];
+                  [alert addAction:[UIAlertAction actionWithTitle:@"强制刷新当前界面" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+                      TriggerTimelineRefresh();
+                  }]];
 
-              [alert addAction:[UIAlertAction actionWithAction:@"查看与导出运行日志" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                  ShowLogViewerController(topVC);
-              }]];
+                  [alert addAction:[UIAlertAction actionWithTitle:@"查看与导出运行日志" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+                      ShowLogViewer(topVC);
+                  }]];
 
-              [alert addAction:[UIAlertAction actionWithAction:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-              [topVC presentViewController:alert animated:YES completion:nil];
+                  [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+                  [topVC presentViewController:alert animated:YES completion:nil];
+              });
           }
 
           static void SetupFloatingButton(void) {
@@ -306,19 +345,13 @@ jobs:
                   btn.layer.borderColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
                   btn.layer.borderWidth = 1.5;
 
-                  [btn addTarget:nil action:@selector(xFloatBtnClicked) forControlEvents:UIControlEventTouchUpInside];
-                  
-                  // 为点击事件动态注册方法
-                  class_addMethod([UIResponder class], @selector(xFloatBtnClicked), imp_implementationWithBlock(^{
-                      ShowSettingsMenu();
-                  }), "v@:");
-
+                  [btn addTarget:btn action:@selector(onButtonClicked) forControlEvents:UIControlEventTouchUpInside];
                   [window addSubview:btn];
                   XLog(@"[UI] 悬浮球挂载成功");
               });
           }
 
-          // ==================== 动态库构造入口 ====================
+          // ==================== 构造入口 ====================
           __attribute__((constructor)) static void initTweak(void) {
               @autoreleasepool {
                   gLogList = [[NSMutableArray alloc] init];
@@ -331,35 +364,29 @@ jobs:
                   XLog(@"=== XAutoTranslate 插件初始化启动 ===");
 
                   dispatch_async(dispatch_get_main_queue(), ^{
-                      // Hook TFNTwitterStatus
                       Class statusCls = objc_getClass("TFNTwitterStatus");
                       if (statusCls) {
-                          HookInstanceMethod(statusCls, @selector(primaryText), (IMP)hook_status_primaryText, (IMP *)&orig_status_primaryText);
-                      } else {
-                          XLog(@"[提示] 未发现 TFNTwitterStatus 类");
+                          HookMethod(statusCls, @selector(primaryText), (IMP)hook_status_primaryText, (IMP *)&orig_status_primaryText);
+                          HookMethod(statusCls, @selector(displayText), (IMP)hook_status_displayText, (IMP *)&orig_status_displayText);
                       }
 
-                      // Hook T1TweetViewModel
                       Class vmCls = objc_getClass("T1TweetViewModel");
                       if (vmCls) {
-                          HookInstanceMethod(vmCls, @selector(primaryText), (IMP)hook_vm_primaryText, (IMP *)&orig_vm_primaryText);
-                      } else {
-                          XLog(@"[提示] 未发现 T1TweetViewModel 类");
+                          HookMethod(vmCls, @selector(primaryText), (IMP)hook_vm_primaryText, (IMP *)&orig_vm_primaryText);
+                          HookMethod(vmCls, @selector(displayText), (IMP)hook_vm_displayText, (IMP *)&orig_vm_displayText);
                       }
 
-                      // 挂载悬浮控制球
                       SetupFloatingButton();
                   });
               }
           }
           EOF
 
-          # 原生编译并去除链式绑定以完全适配 JailFools
           xcrun -sdk iphoneos clang -arch arm64 -dynamiclib \
             -miphoneos-version-min=15.0 \
             -fobjc-arc \
             -framework Foundation -framework UIKit \
-            -Wl,-no_fixup_chains \
+            -Wno-deprecated-declarations \
             -o output/XAutoTranslate.dylib \
             Tweak.m
 
