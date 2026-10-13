@@ -1,0 +1,9 @@
+Package: com.developer.xautotranslate
+Name: XAutoTranslate
+Depends: mobilesubstrate (>= 0.9.5000), ellekit
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Automatically translate all X posts into Chinese on iOS 17.
+Maintainer: Developer
+Author: Developer
+Section: Tweaks
