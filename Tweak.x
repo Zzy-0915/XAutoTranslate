@@ -1,33 +1,24 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-
-@interface TFNTwitterStatus : NSObject
-@property (nonatomic, readonly) long long statusID;
-@property (nonatomic, copy, readonly) NSString *statusIDString;
-@property (nonatomic, copy, readonly) NSString *primaryText;
-@property (nonatomic, copy, readonly) NSString *legacyLanguage;
-@end
-
-@interface T1StatusView : UIView
-@property (nonatomic, strong) TFNTwitterStatus *status;
-@end
+#import <objc/runtime.h>
+#import <objc/message.h>
 
 static NSCache *gTranslationCache = nil;
 static NSMutableSet *gPendingRequests = nil;
 static dispatch_queue_t gTranslateQueue = nil;
 static NSString *const kXAutoTranslateNotification = @"kXAutoTranslateDidCompleteNotification";
 
+// 简易中文字符检测
 static BOOL IsChineseText(NSString *text) {
     if (!text || text.length == 0) return YES;
     for (NSUInteger i = 0; i < text.length; i++) {
         unichar c = [text characterAtIndex:i];
-        if (c >= 0x4e00 && c <= 0x9fff) {
-            return YES;
-        }
+        if (c >= 0x4e00 && c <= 0x9fff) return YES;
     }
     return NO;
 }
 
+// 异步免 Key 翻译请求
 static void RequestTranslation(NSString *text, NSString *statusID) {
     if (!text || text.length == 0 || !statusID) return;
 
@@ -79,13 +70,25 @@ static void RequestTranslation(NSString *text, NSString *statusID) {
     });
 }
 
-%hook TFNTwitterStatus
+// 原方法指针存储
+static NSString *(*orig_primaryText)(id, SEL) = NULL;
+static id (*orig_initWithFrame)(id, SEL, CGRect) = NULL;
 
-- (NSString *)primaryText {
-    NSString *orig = %orig;
+// Hook: 替换文本获取逻辑
+static NSString *hook_primaryText(id self, SEL _cmd) {
+    NSString *orig = orig_primaryText ? orig_primaryText(self, _cmd) : nil;
     if (!orig || orig.length == 0) return orig;
 
-    NSString *sid = self.statusIDString ?: [NSString stringWithFormat:@"%lld", self.statusID];
+    NSString *sid = nil;
+    if ([self respondsToSelector:@selector(statusIDString)]) {
+        sid = ((NSString *(*)(id, SEL))objc_msgSend)(self, @selector(statusIDString));
+    }
+    if (!sid && [self respondsToSelector:@selector(statusID)]) {
+        long long sidVal = ((long long (*)(id, SEL))objc_msgSend)(self, @selector(statusID));
+        if (sidVal != 0) {
+            sid = [NSString stringWithFormat:@"%lld", sidVal];
+        }
+    }
     if (!sid || [sid isEqualToString:@"0"]) return orig;
 
     NSString *cached = [gTranslationCache objectForKey:sid];
@@ -103,41 +106,70 @@ static void RequestTranslation(NSString *text, NSString *statusID) {
     return orig;
 }
 
-%end
-
-%hook T1StatusView
-
-- (instancetype)initWithFrame:(CGRect)frame {
-    id orig = %orig;
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(_xAutoTranslateHandleRefresh:)
-                                                 name:kXAutoTranslateNotification
-                                               object:nil];
-    return orig;
-}
-
-%new
-- (void)_xAutoTranslateHandleRefresh:(NSNotification *)note {
+// 刷新回调
+static void handleStatusViewRefresh(id self, SEL _cmd, NSNotification *note) {
     NSString *updatedSid = note.object;
-    NSString *mySid = self.status.statusIDString ?: [NSString stringWithFormat:@"%lld", self.status.statusID];
-    if ([mySid isEqualToString:updatedSid]) {
-        [self setNeedsLayout];
-        [self layoutIfNeeded];
+    id status = nil;
+    if ([self respondsToSelector:@selector(status)]) {
+        status = ((id (*)(id, SEL))objc_msgSend)(self, @selector(status));
+    }
+    if (status) {
+        NSString *mySid = nil;
+        if ([status respondsToSelector:@selector(statusIDString)]) {
+            mySid = ((NSString *(*)(id, SEL))objc_msgSend)(status, @selector(statusIDString));
+        }
+        if (!mySid && [status respondsToSelector:@selector(statusID)]) {
+            long long sidVal = ((long long (*)(id, SEL))objc_msgSend)(status, @selector(statusID));
+            mySid = [NSString stringWithFormat:@"%lld", sidVal];
+        }
+        if ([mySid isEqualToString:updatedSid] && [self isKindOfClass:[UIView class]]) {
+            UIView *v = (UIView *)self;
+            [v setNeedsLayout];
+            [v layoutIfNeeded];
+        }
     }
 }
 
-- (void)dealloc {
-    [[NSNotificationCenter defaultCenter] removeObserver:self];
-    %orig;
+// Hook: 视图初始化注入通知监听
+static id hook_initWithFrame(id self, SEL _cmd, CGRect frame) {
+    id instance = orig_initWithFrame ? orig_initWithFrame(self, _cmd, frame) : self;
+    if (instance) {
+        [[NSNotificationCenter defaultCenter] addObserver:instance
+                                                 selector:@selector(_xAutoTranslateHandleRefresh:)
+                                                     name:kXAutoTranslateNotification
+                                                   object:nil];
+    }
+    return instance;
 }
 
-%end
+static void HookMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
+    if (!cls) return;
+    Method method = class_getInstanceMethod(cls, sel);
+    if (method) {
+        *origImp = method_getImplementation(method);
+        method_setImplementation(method, newImp);
+    }
+}
 
-%ctor {
+// 入口函数（动态库加载时自动执行）
+__attribute__((constructor)) static void initTweak(void) {
     @autoreleasepool {
         gTranslationCache = [[NSCache alloc] init];
         gTranslationCache.countLimit = 500;
         gPendingRequests = [[NSMutableSet alloc] init];
         gTranslateQueue = dispatch_queue_create("com.hook.x.autotranslate", DISPATCH_QUEUE_SERIAL);
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            Class statusCls = objc_getClass("TFNTwitterStatus");
+            if (statusCls) {
+                HookMethod(statusCls, @selector(primaryText), (IMP)hook_primaryText, (IMP *)&orig_primaryText);
+            }
+
+            Class viewCls = objc_getClass("T1StatusView");
+            if (viewCls) {
+                class_addMethod(viewCls, @selector(_xAutoTranslateHandleRefresh:), (IMP)handleStatusViewRefresh, "v@:@");
+                HookMethod(viewCls, @selector(initWithFrame:), (IMP)hook_initWithFrame, (IMP *)&orig_initWithFrame);
+            }
+        });
     }
 }
