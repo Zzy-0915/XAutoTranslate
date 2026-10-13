@@ -12,26 +12,36 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Packaging Tools
+      - name: Install Dependencies
         run: |
-          brew install dpkg ldid
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install dpkg ldid
 
-      - name: Install Theos & SDKs
+      - name: Setup Theos
         run: |
           git clone --recursive https://github.com/theos/theos.git ~/theos
-          git clone --depth=1 https://github.com/theos/sdks.git ~/theos/sdks
-          echo "THEOS=~/theos" >> $GITHUB_ENV
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+
+      - name: Setup iOS 16.5 Patched SDK
+        run: |
+          curl -fsSL -o /tmp/iPhoneOS16.5.sdk.tar.xz https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz
+          tar -xf /tmp/iPhoneOS16.5.sdk.tar.xz -C ~/theos/sdks
+          rm /tmp/iPhoneOS16.5.sdk.tar.xz
 
       - name: Build Rootless Package
         run: |
-          export THEOS=~/theos
+          export THEOS=$HOME/theos
           make clean
-          make package
+          make package FINALPACKAGE=1
+
+      - name: Collect Output Files
+        run: |
+          mkdir -p output
+          find .theos/obj -name "*.dylib" -exec cp {} output/ \; 2>/dev/null || true
+          find packages -name "*.deb" -exec cp {} output/ \; 2>/dev/null || true
+          ls -la output/
 
       - name: Upload Binaries
         uses: actions/upload-artifact@v4
         with:
           name: XAutoTranslate-Binaries
-          path: |
-            .theos/obj/**/*.dylib
-            packages/*.deb
+          path: output/*
