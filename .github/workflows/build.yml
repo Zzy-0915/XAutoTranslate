@@ -61,27 +61,29 @@ jobs:
               return [[NSUserDefaults standardUserDefaults] integerForKey:kPrefTranslationMode];
           }
 
-          // 遍历并重载屏幕上所有集合与列表视图
-          static void ReloadAllTimelineViews(UIView *view) {
-              if (!view) return;
-              if ([view isKindOfClass:[UICollectionView class]]) {
-                  [((UICollectionView *)view) reloadData];
-              } else if ([view isKindOfClass:[UITableView class]]) {
-                  [((UITableView *)view) reloadData];
-              }
-              for (UIView *sub in view.subviews) {
-                  ReloadAllTimelineViews(sub);
-              }
-          }
-
-          static void TriggerTimelineRefresh(void) {
+          // 递归清除对象内部所有的排版与高度缓存，并触发 UI 刷新
+          static void InvalidateLayoutAndReload(void) {
               dispatch_async(dispatch_get_main_queue(), ^{
                   UIWindow *targetWindow = nil;
                   for (UIWindow *w in [UIApplication sharedApplication].windows) {
                       if (w.isKeyWindow) { targetWindow = w; break; }
                   }
                   if (!targetWindow) targetWindow = [UIApplication sharedApplication].windows.firstObject;
-                  if (targetWindow) ReloadAllTimelineViews(targetWindow);
+
+                  void (^__block cleanAndReload)(UIView *) = ^(UIView *view) {
+                      if ([view isKindOfClass:[UICollectionView class]]) {
+                          UICollectionView *cv = (UICollectionView *)view;
+                          [cv.collectionViewLayout invalidateLayout];
+                          [cv reloadData];
+                      } else if ([view isKindOfClass:[UITableView class]]) {
+                          [((UITableView *)view) reloadData];
+                      }
+                      for (UIView *sub in view.subviews) {
+                          cleanAndReload(sub);
+                      }
+                  };
+
+                  if (targetWindow) cleanAndReload(targetWindow);
               });
           }
 
@@ -97,7 +99,6 @@ jobs:
               XLog(@"发起翻译 -> ID: %@, 原文: %.25@...", statusID, text);
 
               dispatch_async(gTranslateQueue, ^{
-                  // 转义 URLQuery 允许的特殊字符，避免 # 话题标签和 & 符号截断 URL
                   NSMutableCharacterSet *allowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
                   [allowed removeCharactersInString:@"#+&?="];
                   NSString *encodedText = [text stringByAddingPercentEncodingWithAllowedCharacters:allowed];
@@ -113,7 +114,7 @@ jobs:
                       }
 
                       if (error) {
-                          XLog(@"[请求异常] 网络错误: %@ (请确认代理分流设置)", error.localizedDescription);
+                          XLog(@"[请求异常] 网络错误: %@", error.localizedDescription);
                           return;
                       }
 
@@ -140,83 +141,68 @@ jobs:
                           if (translatedFull.length > 0) {
                               XLog(@"[翻译成功] ID: %@ -> 译文: %.30@...", statusID, translatedFull);
                               [gTranslationCache setObject:[translatedFull copy] forKey:statusID];
-                              TriggerTimelineRefresh();
+                              InvalidateLayoutAndReload();
                           }
-                      } else {
-                          XLog(@"[解析失败] 数据格式无法解析");
                       }
                   }];
                   [task resume];
               });
           }
 
-          // 核心文本替换处理
-          static NSString *ProcessTranslatedText(NSString *orig, NSString *sid) {
-              if (!IsAutoTranslateEnabled()) return orig;
-              if (!orig || orig.length == 0 || !sid || [sid isEqualToString:@"0"]) return orig;
-
-              NSString *cached = [gTranslationCache objectForKey:sid];
-              if (cached) {
-                  if ([cached isEqualToString:orig]) return orig;
-                  if (GetTranslationMode() == 1) {
-                      return cached; // 纯中文模式
-                  }
-                  return [NSString stringWithFormat:@"%@\n\n🇨🇳 [自动翻译]\n%@", orig, cached];
+          // 格式化文本合并
+          static NSString *FormatCombinedString(NSString *orig, NSString *translated) {
+              if (GetTranslationMode() == 1) {
+                  return translated;
               }
-
-              RequestTranslation(orig, sid);
-              return orig;
+              return [NSString stringWithFormat:@"%@\n\n🇨🇳 [自动翻译]\n%@", orig, translated];
           }
 
-          // ==================== Hook 拦截点 ====================
-          static NSString *(*orig_status_primaryText)(id, SEL) = NULL;
-          static NSString *hook_status_primaryText(id self, SEL _cmd) {
-              NSString *orig = orig_status_primaryText ? orig_status_primaryText(self, _cmd) : nil;
-              NSString *sid = nil;
-              if ([self respondsToSelector:@selector(statusIDString)]) {
-                  sid = ((NSString *(*)(id, SEL))objc_msgSend)(self, @selector(statusIDString));
-              }
-              if (!sid && [self respondsToSelector:@selector(statusID)]) {
-                  long long sidVal = ((long long (*)(id, SEL))objc_msgSend)(self, @selector(statusID));
-                  if (sidVal != 0) sid = [NSString stringWithFormat:@"%lld", sidVal];
-              }
-              return ProcessTranslatedText(orig, sid);
-          }
-
+          // ==================== Hook 核心逻辑 ====================
           static NSString *(*orig_status_displayText)(id, SEL) = NULL;
           static NSString *hook_status_displayText(id self, SEL _cmd) {
               NSString *orig = orig_status_displayText ? orig_status_displayText(self, _cmd) : nil;
+              if (!IsAutoTranslateEnabled() || !orig || orig.length == 0) return orig;
+
               NSString *sid = nil;
               if ([self respondsToSelector:@selector(statusIDString)]) {
                   sid = ((NSString *(*)(id, SEL))objc_msgSend)(self, @selector(statusIDString));
               }
-              return ProcessTranslatedText(orig, sid);
+
+              if (sid && ![sid isEqualToString:@"0"]) {
+                  NSString *cached = [gTranslationCache objectForKey:sid];
+                  if (cached) {
+                      if ([cached isEqualToString:orig]) return orig;
+                      return FormatCombinedString(orig, cached);
+                  }
+                  RequestTranslation(orig, sid);
+              }
+              return orig;
           }
 
-          static NSString *(*orig_vm_primaryText)(id, SEL) = NULL;
-          static NSString *hook_vm_primaryText(id self, SEL _cmd) {
-              NSString *orig = orig_vm_primaryText ? orig_vm_primaryText(self, _cmd) : nil;
-              NSString *sid = nil;
-              if ([self respondsToSelector:@selector(status)]) {
-                  id status = ((id (*)(id, SEL))objc_msgSend)(self, @selector(status));
-                  if (status && [status respondsToSelector:@selector(statusIDString)]) {
-                      sid = ((NSString *(*)(id, SEL))objc_msgSend)(status, @selector(statusIDString));
-                  }
-              }
-              return ProcessTranslatedText(orig, sid);
-          }
+          // Hook: 现代 X 最核心的富文本排版入口 attributedDisplayText
+          static NSAttributedString *(*orig_status_attributedDisplayText)(id, SEL) = NULL;
+          static NSAttributedString *hook_status_attributedDisplayText(id self, SEL _cmd) {
+              NSAttributedString *origAttr = orig_status_attributedDisplayText ? orig_status_attributedDisplayText(self, _cmd) : nil;
+              if (!IsAutoTranslateEnabled() || !origAttr || origAttr.length == 0) return origAttr;
 
-          static NSString *(*orig_vm_displayText)(id, SEL) = NULL;
-          static NSString *hook_vm_displayText(id self, SEL _cmd) {
-              NSString *orig = orig_vm_displayText ? orig_vm_displayText(self, _cmd) : nil;
               NSString *sid = nil;
-              if ([self respondsToSelector:@selector(status)]) {
-                  id status = ((id (*)(id, SEL))objc_msgSend)(self, @selector(status));
-                  if (status && [status respondsToSelector:@selector(statusIDString)]) {
-                      sid = ((NSString *(*)(id, SEL))objc_msgSend)(status, @selector(statusIDString));
-                  }
+              if ([self respondsToSelector:@selector(statusIDString)]) {
+                  sid = ((NSString *(*)(id, SEL))objc_msgSend)(self, @selector(statusIDString));
               }
-              return ProcessTranslatedText(orig, sid);
+
+              if (sid && ![sid isEqualToString:@"0"]) {
+                  NSString *cached = [gTranslationCache objectForKey:sid];
+                  if (cached) {
+                      NSString *plainOrig = origAttr.string;
+                      if ([cached isEqualToString:plainOrig]) return origAttr;
+
+                      NSString *combined = FormatCombinedString(plainOrig, cached);
+                      NSDictionary *attrs = origAttr.length > 0 ? [origAttr attributesAtIndex:0 effectiveRange:NULL] : nil;
+                      return [[NSAttributedString alloc] initWithString:combined attributes:attrs];
+                  }
+                  RequestTranslation(origAttr.string, sid);
+              }
+              return origAttr;
           }
 
           static void HookMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
@@ -302,7 +288,7 @@ jobs:
                                                            handler:^(UIAlertAction * _Nonnull action) {
                       [[NSUserDefaults standardUserDefaults] setBool:!isEnabled forKey:kPrefAutoTranslateEnabled];
                       [[NSUserDefaults standardUserDefaults] synchronize];
-                      TriggerTimelineRefresh();
+                      InvalidateLayoutAndReload();
                   }]];
 
                   [alert addAction:[UIAlertAction actionWithTitle:(curMode == 0 ? @"切换为：仅显示译文" : @"切换为：原文+译文双语")
@@ -310,11 +296,11 @@ jobs:
                                                            handler:^(UIAlertAction * _Nonnull action) {
                       [[NSUserDefaults standardUserDefaults] setInteger:(curMode == 0 ? 1 : 0) forKey:kPrefTranslationMode];
                       [[NSUserDefaults standardUserDefaults] synchronize];
-                      TriggerTimelineRefresh();
+                      InvalidateLayoutAndReload();
                   }]];
 
                   [alert addAction:[UIAlertAction actionWithTitle:@"强制刷新当前界面" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-                      TriggerTimelineRefresh();
+                      InvalidateLayoutAndReload();
                   }]];
 
                   [alert addAction:[UIAlertAction actionWithTitle:@"查看与导出运行日志" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
@@ -366,14 +352,10 @@ jobs:
                   dispatch_async(dispatch_get_main_queue(), ^{
                       Class statusCls = objc_getClass("TFNTwitterStatus");
                       if (statusCls) {
-                          HookMethod(statusCls, @selector(primaryText), (IMP)hook_status_primaryText, (IMP *)&orig_status_primaryText);
+                          // Hook 纯文本
                           HookMethod(statusCls, @selector(displayText), (IMP)hook_status_displayText, (IMP *)&orig_status_displayText);
-                      }
-
-                      Class vmCls = objc_getClass("T1TweetViewModel");
-                      if (vmCls) {
-                          HookMethod(vmCls, @selector(primaryText), (IMP)hook_vm_primaryText, (IMP *)&orig_vm_primaryText);
-                          HookMethod(vmCls, @selector(displayText), (IMP)hook_vm_displayText, (IMP *)&orig_vm_displayText);
+                          // Hook 富文本（X渲染的关键入口）
+                          HookMethod(statusCls, @selector(attributedDisplayText), (IMP)hook_status_attributedDisplayText, (IMP *)&orig_status_attributedDisplayText);
                       }
 
                       SetupFloatingButton();
