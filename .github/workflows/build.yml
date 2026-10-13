@@ -12,35 +12,192 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Theos
-        run: |
-          git clone --recursive https://github.com/theos/theos.git ~/theos
-          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-
-      - name: Setup iOS SDK
-        run: |
-          git clone --depth=1 https://github.com/theos/sdks.git /tmp/theos-sdks
-          cp -r /tmp/theos-sdks/*.sdk ~/theos/sdks/
-          rm -rf /tmp/theos-sdks
-
-      - name: Prepare Source Files
-        run: |
-          # 自动统一为原生 Objective-C 格式
-          if [ -f Tweak.x ] && [ ! -f Tweak.m ]; then
-            mv Tweak.x Tweak.m
-          fi
-          ls -la
-
-      - name: Build Dylib
-        run: |
-          export THEOS=$HOME/theos
-          make clean
-          make FINALPACKAGE=1
-
-      - name: Collect Dylib
+      - name: Generate Code & Compile Dylib
         run: |
           mkdir -p output
-          find .theos/obj -name "*.dylib" -exec cp {} output/XAutoTranslate.dylib \;
+
+          # 写入专为 JailFools 优化的纯原生 Objective-C 注入源码
+          cat << 'EOF' > Tweak.m
+          #import <Foundation/Foundation.h>
+          #import <UIKit/UIKit.h>
+          #import <objc/runtime.h>
+          #import <objc/message.h>
+
+          static NSCache *gTranslationCache = nil;
+          static NSMutableSet *gPendingRequests = nil;
+          static dispatch_queue_t gTranslateQueue = nil;
+          static NSString *const kXAutoTranslateNotification = @"kXAutoTranslateDidCompleteNotification";
+
+          static BOOL IsChineseText(NSString *text) {
+              if (!text || text.length == 0) return YES;
+              for (NSUInteger i = 0; i < text.length; i++) {
+                  unichar c = [text characterAtIndex:i];
+                  if (c >= 0x4e00 && c <= 0x9fff) return YES;
+              }
+              return NO;
+          }
+
+          static void RequestTranslation(NSString *text, NSString *statusID) {
+              if (!text || text.length == 0 || !statusID) return;
+
+              @synchronized (gPendingRequests) {
+                  if ([gPendingRequests containsObject:statusID]) return;
+                  [gPendingRequests addObject:statusID];
+              }
+
+              dispatch_async(gTranslateQueue, ^{
+                  NSString *encodedText = [text stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+                  NSString *urlString = [NSString stringWithFormat:@"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=%@", encodedText];
+                  
+                  NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlString]];
+                  [request setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X)" forHTTPHeaderField:@"User-Agent"];
+                  request.timeoutInterval = 10.0;
+
+                  NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+                      @synchronized (gPendingRequests) {
+                          [gPendingRequests removeObject:statusID];
+                      }
+
+                      if (error || !data) return;
+
+                      NSError *jsonErr = nil;
+                      id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonErr];
+                      if (!jsonErr && [json isKindOfClass:[NSArray class]] && [json count] > 0) {
+                          NSArray *segments = json[0];
+                          NSMutableString *translatedFull = [NSMutableString string];
+                          
+                          if ([segments isKindOfClass:[NSArray class]]) {
+                              for (id seg in segments) {
+                                  if ([seg isKindOfClass:[NSArray class]] && [seg count] > 0) {
+                                      [translatedFull appendString:seg[0]];
+                                  }
+                              }
+                          }
+
+                          if (translatedFull.length > 0) {
+                              [gTranslationCache setObject:[translatedFull copy] forKey:statusID];
+
+                              dispatch_async(dispatch_get_main_queue(), ^{
+                                  [[NSNotificationCenter defaultCenter] postNotificationName:kXAutoTranslateNotification
+                                                                                      object:statusID];
+                              });
+                          }
+                      }
+                  }];
+                  [task resume];
+              });
+          }
+
+          static NSString *(*orig_primaryText)(id, SEL) = NULL;
+          static id (*orig_initWithFrame)(id, SEL, CGRect) = NULL;
+
+          static NSString *hook_primaryText(id self, SEL _cmd) {
+              NSString *orig = orig_primaryText ? orig_primaryText(self, _cmd) : nil;
+              if (!orig || orig.length == 0) return orig;
+
+              NSString *sid = nil;
+              if ([self respondsToSelector:@selector(statusIDString)]) {
+                  sid = ((NSString *(*)(id, SEL))objc_msgSend)(self, @selector(statusIDString));
+              }
+              if (!sid && [self respondsToSelector:@selector(statusID)]) {
+                  long long sidVal = ((long long (*)(id, SEL))objc_msgSend)(self, @selector(statusID));
+                  if (sidVal != 0) {
+                      sid = [NSString stringWithFormat:@"%lld", sidVal];
+                  }
+              }
+              if (!sid || [sid isEqualToString:@"0"]) return orig;
+
+              NSString *cached = [gTranslationCache objectForKey:sid];
+              if (cached) {
+                  if ([cached isEqualToString:orig]) return orig;
+                  return [NSString stringWithFormat:@"%@\n\n🇨🇳 [自动翻译]\n%@", orig, cached];
+              }
+
+              if (IsChineseText(orig) && orig.length < 15) {
+                  [gTranslationCache setObject:orig forKey:sid];
+                  return orig;
+              }
+
+              RequestTranslation(orig, sid);
+              return orig;
+          }
+
+          static void handleStatusViewRefresh(id self, SEL _cmd, NSNotification *note) {
+              NSString *updatedSid = note.object;
+              id status = nil;
+              if ([self respondsToSelector:@selector(status)]) {
+                  status = ((id (*)(id, SEL))objc_msgSend)(self, @selector(status));
+              }
+              if (status) {
+                  NSString *mySid = nil;
+                  if ([status respondsToSelector:@selector(statusIDString)]) {
+                      mySid = ((NSString *(*)(id, SEL))objc_msgSend)(status, @selector(statusIDString));
+                  }
+                  if (!mySid && [status respondsToSelector:@selector(statusID)]) {
+                      long long sidVal = ((long long (*)(id, SEL))objc_msgSend)(status, @selector(statusID));
+                      mySid = [NSString stringWithFormat:@"%lld", sidVal];
+                  }
+                  if ([mySid isEqualToString:updatedSid] && [self isKindOfClass:[UIView class]]) {
+                      UIView *v = (UIView *)self;
+                      [v setNeedsLayout];
+                      [v layoutIfNeeded];
+                  }
+              }
+          }
+
+          static id hook_initWithFrame(id self, SEL _cmd, CGRect frame) {
+              id instance = orig_initWithFrame ? orig_initWithFrame(self, _cmd, frame) : self;
+              if (instance) {
+                  [[NSNotificationCenter defaultCenter] addObserver:instance
+                                                           selector:@selector(_xAutoTranslateHandleRefresh:)
+                                                               name:kXAutoTranslateNotification
+                                                             object:nil];
+              }
+              return instance;
+          }
+
+          static void HookMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
+              if (!cls) return;
+              Method method = class_getInstanceMethod(cls, sel);
+              if (method) {
+                  *origImp = method_getImplementation(method);
+                  method_setImplementation(method, newImp);
+              }
+          }
+
+          __attribute__((constructor)) static void initTweak(void) {
+              @autoreleasepool {
+                  gTranslationCache = [[NSCache alloc] init];
+                  gTranslationCache.countLimit = 500;
+                  gPendingRequests = [[NSMutableSet alloc] init];
+                  gTranslateQueue = dispatch_queue_create("com.hook.x.autotranslate", DISPATCH_QUEUE_SERIAL);
+
+                  dispatch_async(dispatch_get_main_queue(), ^{
+                      Class statusCls = objc_getClass("TFNTwitterStatus");
+                      if (statusCls) {
+                          HookMethod(statusCls, @selector(primaryText), (IMP)hook_primaryText, (IMP *)&orig_primaryText);
+                      }
+
+                      Class viewCls = objc_getClass("T1StatusView");
+                      if (viewCls) {
+                          class_addMethod(viewCls, @selector(_xAutoTranslateHandleRefresh:), (IMP)handleStatusViewRefresh, "v@:@");
+                          HookMethod(viewCls, @selector(initWithFrame:), (IMP)hook_initWithFrame, (IMP *)&orig_initWithFrame);
+                      }
+                  });
+              }
+          }
+          EOF
+
+          # 使用苹果原生 Clang 构建标准 arm64 动态库（禁用链式修复以兼容 JailFools 的 ldid）
+          xcrun -sdk iphoneos clang -arch arm64 -dynamiclib \
+            -miphoneos-version-min=15.0 \
+            -fobjc-arc \
+            -framework Foundation -framework UIKit \
+            -Wl,-no_fixup_chains \
+            -o output/XAutoTranslate.dylib \
+            Tweak.m
+
+          codesign -s - --force output/XAutoTranslate.dylib
           ls -la output/
 
       - name: Upload Dylib
