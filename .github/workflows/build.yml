@@ -1,4 +1,4 @@
-name: Build JailFools Dylib (Deep Injector)
+name: Build JailFools Dylib (Native Pipeline Hook)
 
 on:
   push:
@@ -22,13 +22,32 @@ jobs:
           #import <objc/runtime.h>
           #import <objc/message.h>
 
+          // ==================== 原生翻译数据模型代理 ====================
+          @interface XTranslationModel : NSObject
+          @property (nonatomic, copy) NSString *text;
+          @property (nonatomic, copy) NSString *translation;
+          @property (nonatomic, copy) NSString *displayText;
+          @property (nonatomic, copy) NSString *sourceLanguage;
+          @property (nonatomic, copy) NSString *localizedLanguage;
+          @property (nonatomic, copy) NSString *localizedSourceLanguage;
+          @end
+
+          @implementation XTranslationModel
+          - (NSString *)text { return _text ?: @""; }
+          - (NSString *)translation { return _text ?: @""; }
+          - (NSString *)displayText { return _text ?: @""; }
+          - (NSString *)sourceLanguage { return @"auto"; }
+          - (NSString *)localizedLanguage { return @"zh-CN"; }
+          - (NSString *)localizedSourceLanguage { return @"外语"; }
+          @end
+
           // ==================== 全局状态与日志管理器 ====================
           static NSMutableArray<NSString *> *gLogList = nil;
           static NSLock *gLogLock = nil;
-          static NSCache<NSString *, NSString *> *gTranslationCache = nil;
+          static NSCache<NSString *, XTranslationModel *> *gTranslationCache = nil;
           static NSMutableSet<NSString *> *gPendingRequests = nil;
           static NSOperationQueue *gTranslateQueue = nil;
-          static NSMapTable<NSString *, id> *gStatusMap = nil; // 弱引用持久化推文对象
+          static NSMapTable<NSString *, id> *gStatusObjectMap = nil;
 
           static NSString *const kPrefAutoTranslateEnabled = @"XAutoTranslate_Enabled";
           static NSString *const kPrefTranslationMode = @"XAutoTranslate_Mode";
@@ -62,17 +81,17 @@ jobs:
               return [[NSUserDefaults standardUserDefaults] integerForKey:kPrefTranslationMode];
           }
 
-          // 合成最终文本
-          static NSString *BuildResultString(NSString *orig, NSString *trans) {
-              if (GetTranslationMode() == 1) {
-                  return trans;
-              }
-              return [NSString stringWithFormat:@"%@\n\n🇨🇳 [自动翻译]\n%@", orig, trans];
-          }
-
-          // 强制刷新屏幕所有的列表视图
-          static void InvalidateAndReloadAllViews(void) {
+          // 核心广播：向 X 官方总线发送更新事件，迫使时间线重排
+          static void NotifyTwitterStatusUpdated(id status, NSString *statusID) {
               dispatch_async(dispatch_get_main_queue(), ^{
+                  // 1. 广播官方状态更新通知
+                  [[NSNotificationCenter defaultCenter] postNotificationName:@"TFNTwitterStatusDidUpdateNotification"
+                                                                      object:status
+                                                                    userInfo:statusID ? @{@"statusID": statusID} : nil];
+                  [[NSNotificationCenter defaultCenter] postNotificationName:@"T1StatusDidUpdateNotification"
+                                                                      object:status];
+
+                  // 2. 遍历视图，清空 CollectionView 布局缓存
                   UIWindow *targetWindow = nil;
                   for (UIWindow *w in [UIApplication sharedApplication].windows) {
                       if (w.isKeyWindow) { targetWindow = w; break; }
@@ -95,45 +114,7 @@ jobs:
               });
           }
 
-          // 直接改写 TFNTwitterStatus 内部的真实变量并清理排版缓存
-          static void ApplyTranslationToStatusInstance(id status, NSString *translated) {
-              if (!status || !translated) return;
-
-              Class cls = [status class];
-              unsigned int ivarCount = 0;
-              Ivar *ivars = class_copyIvarList(cls, &ivarCount);
-
-              for (unsigned int i = 0; i < ivarCount; i++) {
-                  const char *name = ivar_getName(ivars[i]);
-                  if (!name) continue;
-                  NSString *ivarName = [NSString stringWithUTF8String:name];
-
-                  // 1. 替换文本变量
-                  if ([ivarName isEqualToString:@"_displayText"] || [ivarName isEqualToString:@"_primaryText"]) {
-                      id oldVal = object_getIvar(status, ivars[i]);
-                      if ([oldVal isKindOfClass:[NSString class]]) {
-                          NSString *newStr = BuildResultString((NSString *)oldVal, translated);
-                          object_setIvar(status, ivars[i], newStr);
-                      }
-                  }
-                  // 2. 清理排版缓存（迫使视图重新计算高度和重绘文本）
-                  else if ([ivarName containsString:@"layout"] ||
-                           [ivarName containsString:@"Layout"] ||
-                           [ivarName containsString:@"metrics"] ||
-                           [ivarName containsString:@"Metrics"] ||
-                           [ivarName containsString:@"attributedText"] ||
-                           [ivarName containsString:@"AttributedText"]) {
-                      object_setIvar(status, ivars[i], nil);
-                  }
-              }
-              free(ivars);
-
-              if ([status respondsToSelector:@selector(setDisplayText:)]) {
-                  ((void(*)(id, SEL, id))objc_msgSend)(status, @selector(setDisplayText:), translated);
-              }
-          }
-
-          // 安全无错的 Google 翻译异步请求
+          // 异步翻译逻辑
           static void RequestTranslation(NSString *text, NSString *statusID) {
               if (!text || text.length == 0 || !statusID) return;
 
@@ -152,7 +133,7 @@ jobs:
                   NSString *urlString = [NSString stringWithFormat:@"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=%@", encodedText];
                   NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlString]];
                   [request setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X)" forHTTPHeaderField:@"User-Agent"];
-                  request.timeoutInterval = 15.0;
+                  request.timeoutInterval = 12.0;
 
                   NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
                       @synchronized (gPendingRequests) {
@@ -160,7 +141,7 @@ jobs:
                       }
 
                       if (error || !data) {
-                          XLog(@"[网络错误] %@", error ? error.localizedDescription : @"无数据返回");
+                          XLog(@"[网络错误] %@", error ? error.localizedDescription : @"无数据");
                           return;
                       }
 
@@ -174,7 +155,6 @@ jobs:
                                   for (id seg in segments) {
                                       if ([seg isKindOfClass:[NSArray class]] && [seg count] > 0) {
                                           id part = seg[0];
-                                          // 严格类型校验，杜绝 NSNull 异常崩溃
                                           if ([part isKindOfClass:[NSString class]]) {
                                               [full appendString:(NSString *)part];
                                           }
@@ -186,72 +166,133 @@ jobs:
                               }
                           }
                       } @catch (NSException *e) {
-                          XLog(@"[解析保护捕获] %@", e.reason);
+                          XLog(@"[解析错误] %@", e.reason);
                       }
 
                       if (translatedResult && translatedResult.length > 0) {
-                          XLog(@"[成功] ID: %@ -> 译文: %.25@...", statusID, translatedResult);
-                          [gTranslationCache setObject:translatedResult forKey:statusID];
+                          XLog(@"[成功获取译文] ID: %@ -> 译文: %.25@...", statusID, translatedResult);
 
-                          dispatch_async(dispatch_get_main_queue(), ^{
-                              id targetStatus = nil;
-                              @synchronized (gStatusMap) {
-                                  targetStatus = [gStatusMap objectForKey:statusID];
-                              }
-                              if (targetStatus) {
-                                  ApplyTranslationToStatusInstance(targetStatus, translatedResult);
-                              }
-                              InvalidateAndReloadAllViews();
-                          });
-                      } else {
-                          XLog(@"[失败] 无法提取有效译文");
+                          XTranslationModel *model = [[XTranslationModel alloc] init];
+                          model.text = translatedResult;
+                          [gTranslationCache setObject:model forKey:statusID];
+
+                          id cachedStatus = nil;
+                          @synchronized (gStatusObjectMap) {
+                              cachedStatus = [gStatusObjectMap objectForKey:statusID];
+                          }
+
+                          // 派发原生更新广播
+                          NotifyTwitterStatusUpdated(cachedStatus, statusID);
                       }
                   }];
                   [task resume];
               }];
           }
 
-          // ==================== Hook 核心入口 ====================
+          // 提取对象的 statusID
+          static NSString *GetStatusIDFromObject(id obj) {
+              if (!obj) return nil;
+              if ([obj respondsToSelector:@selector(statusIDString)]) {
+                  NSString *sid = ((NSString *(*)(id, SEL))objc_msgSend)(obj, @selector(statusIDString));
+                  if (sid && sid.length > 0) return sid;
+              }
+              if ([obj respondsToSelector:@selector(statusID)]) {
+                  long long sidVal = ((long long (*)(id, SEL))objc_msgSend)(obj, @selector(statusID));
+                  if (sidVal != 0) return [NSString stringWithFormat:@"%lld", sidVal];
+              }
+              if ([obj respondsToSelector:@selector(status)]) {
+                  id subStatus = ((id (*)(id, SEL))objc_msgSend)(obj, @selector(status));
+                  return GetStatusIDFromObject(subStatus);
+              }
+              return nil;
+          }
+
+          // ==================== Hook 注入点 ====================
+
+          // Hook: TFNTwitterStatus translation 属性
+          static id (*orig_status_translation)(id, SEL) = NULL;
+          static id hook_status_translation(id self, SEL _cmd) {
+              if (IsAutoTranslateEnabled()) {
+                  NSString *sid = GetStatusIDFromObject(self);
+                  if (sid) {
+                      XTranslationModel *cached = [gTranslationCache objectForKey:sid];
+                      if (cached) return cached;
+                  }
+              }
+              return orig_status_translation ? orig_status_translation(self, _cmd) : nil;
+          }
+
+          // Hook: TFNTwitterStatus hasTranslation 判定
+          static BOOL (*orig_status_hasTranslation)(id, SEL) = NULL;
+          static BOOL hook_status_hasTranslation(id self, SEL _cmd) {
+              if (IsAutoTranslateEnabled()) {
+                  NSString *sid = GetStatusIDFromObject(self);
+                  if (sid && [gTranslationCache objectForKey:sid]) {
+                      return YES;
+                  }
+              }
+              return orig_status_hasTranslation ? orig_status_hasTranslation(self, _cmd) : NO;
+          }
+
+          // Hook: TFNTwitterStatus displayText（数据捕获与双语合成）
           static NSString *(*orig_status_displayText)(id, SEL) = NULL;
           static NSString *hook_status_displayText(id self, SEL _cmd) {
               NSString *orig = orig_status_displayText ? orig_status_displayText(self, _cmd) : nil;
               if (!IsAutoTranslateEnabled() || !orig || orig.length == 0) return orig;
 
-              NSString *sid = nil;
-              if ([self respondsToSelector:@selector(statusIDString)]) {
-                  sid = ((NSString *(*)(id, SEL))objc_msgSend)(self, @selector(statusIDString));
-              }
-              if (!sid && [self respondsToSelector:@selector(statusID)]) {
-                  long long sidVal = ((long long (*)(id, SEL))objc_msgSend)(self, @selector(statusID));
-                  if (sidVal != 0) sid = [NSString stringWithFormat:@"%lld", sidVal];
-              }
-
+              NSString *sid = GetStatusIDFromObject(self);
               if (sid && ![sid isEqualToString:@"0"]) {
-                  @synchronized (gStatusMap) {
-                      [gStatusMap setObject:self forKey:sid];
+                  @synchronized (gStatusObjectMap) {
+                      [gStatusObjectMap setObject:self forKey:sid];
                   }
 
-                  NSString *cached = [gTranslationCache objectForKey:sid];
+                  XTranslationModel *cached = [gTranslationCache objectForKey:sid];
                   if (cached) {
-                      if ([cached isEqualToString:orig]) return orig;
-                      return BuildResultString(orig, cached);
+                      if ([cached.text isEqualToString:orig]) return orig;
+                      if (GetTranslationMode() == 1) {
+                          return cached.text; // 纯中文模式
+                      }
+                      return [NSString stringWithFormat:@"%@\n\n🇨🇳 [自动翻译]\n%@", orig, cached.text];
                   }
+
                   RequestTranslation(orig, sid);
               }
               return orig;
           }
 
-          // 挂钩 Twitter 自带翻译接口：强制开启翻译状态
-          static BOOL (*orig_hasTranslation)(id, SEL) = NULL;
-          static BOOL hook_hasTranslation(id self, SEL _cmd) {
-              NSString *sid = nil;
-              if ([self respondsToSelector:@selector(statusIDString)]) {
-                  sid = ((NSString *(*)(id, SEL))objc_msgSend)(self, @selector(statusIDString));
+          // Hook: T1TweetViewModel 原生翻译开关
+          static BOOL (*orig_vm_shouldShowTranslation)(id, SEL) = NULL;
+          static BOOL hook_vm_shouldShowTranslation(id self, SEL _cmd) {
+              if (IsAutoTranslateEnabled()) {
+                  NSString *sid = GetStatusIDFromObject(self);
+                  if (sid && [gTranslationCache objectForKey:sid]) {
+                      return YES;
+                  }
               }
-              if (sid && [gTranslationCache objectForKey:sid]) {
-                  return YES;
+              return orig_vm_shouldShowTranslation ? orig_vm_shouldShowTranslation(self, _cmd) : NO;
+          }
+
+          static BOOL (*orig_vm_hasTranslation)(id, SEL) = NULL;
+          static BOOL hook_vm_hasTranslation(id self, SEL _cmd) {
+              if (IsAutoTranslateEnabled()) {
+                  NSString *sid = GetStatusIDFromObject(self);
+                  if (sid && [gTranslationCache objectForKey:sid]) {
+                      return YES;
+                  }
               }
-              return orig_hasTranslation ? orig_hasTranslation(self, _cmd) : NO;
+              return orig_vm_hasTranslation ? orig_vm_hasTranslation(self, _cmd) : NO;
+          }
+
+          static id (*orig_vm_translation)(id, SEL) = NULL;
+          static id hook_vm_translation(id self, SEL _cmd) {
+              if (IsAutoTranslateEnabled()) {
+                  NSString *sid = GetStatusIDFromObject(self);
+                  if (sid) {
+                      XTranslationModel *cached = [gTranslationCache objectForKey:sid];
+                      if (cached) return cached;
+                  }
+              }
+              return orig_vm_translation ? orig_vm_translation(self, _cmd) : nil;
           }
 
           static void HookMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
@@ -262,6 +303,34 @@ jobs:
                   method_setImplementation(m, newImp);
                   XLog(@"[Hook成功] %@ -> %@", NSStringFromClass(cls), NSStringFromSelector(sel));
               }
+          }
+
+          // 动态类遍历探测与挂钩
+          static void HookAllTweetViewModels(void) {
+              int numClasses = objc_getClassList(NULL, 0);
+              Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
+              numClasses = objc_getClassList(classes, numClasses);
+
+              for (int i = 0; i < numClasses; i++) {
+                  const char *name = class_getName(classes[i]);
+                  if (!name) continue;
+                  // 匹配 T1TweetViewModel 或 Swift 重整类名
+                  if (strstr(name, "TweetViewModel")) {
+                      Class vmCls = classes[i];
+                      XLog(@"[发现 ViewModel 类] %s", name);
+
+                      if ([vmCls instancesRespondToSelector:@selector(shouldShowTranslation)]) {
+                          HookMethod(vmCls, @selector(shouldShowTranslation), (IMP)hook_vm_shouldShowTranslation, (IMP *)&orig_vm_shouldShowTranslation);
+                      }
+                      if ([vmCls instancesRespondToSelector:@selector(hasTranslation)]) {
+                          HookMethod(vmCls, @selector(hasTranslation), (IMP)hook_vm_hasTranslation, (IMP *)&orig_vm_hasTranslation);
+                      }
+                      if ([vmCls instancesRespondToSelector:@selector(translation)]) {
+                          HookMethod(vmCls, @selector(translation), (IMP)hook_vm_translation, (IMP *)&orig_vm_translation);
+                      }
+                  }
+              }
+              free(classes);
           }
 
           // ==================== 悬浮球 & 菜单 ====================
@@ -329,7 +398,7 @@ jobs:
 
                   NSString *title = [NSString stringWithFormat:@"自动翻译设置 (当前: %@)", isEnabled ? @"✅ 开启" : @"❌ 关闭"];
                   UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
-                                                                                 message:@"支持时间线及进入正文自动深度重绘"
+                                                                                 message:@"原生通道驱动版已就绪"
                                                                           preferredStyle:UIAlertControllerStyleActionSheet];
 
                   [alert addAction:[UIAlertAction actionWithTitle:(isEnabled ? @"暂停自动翻译" : @"开启自动翻译")
@@ -337,7 +406,7 @@ jobs:
                                                            handler:^(UIAlertAction *action) {
                       [[NSUserDefaults standardUserDefaults] setBool:!isEnabled forKey:kPrefAutoTranslateEnabled];
                       [[NSUserDefaults standardUserDefaults] synchronize];
-                      InvalidateAndReloadAllViews();
+                      NotifyTwitterStatusUpdated(nil, nil);
                   }]];
 
                   [alert addAction:[UIAlertAction actionWithTitle:(curMode == 0 ? @"切换为：仅显示译文" : @"切换为：原文+译文双语")
@@ -345,11 +414,11 @@ jobs:
                                                            handler:^(UIAlertAction *action) {
                       [[NSUserDefaults standardUserDefaults] setInteger:(curMode == 0 ? 1 : 0) forKey:kPrefTranslationMode];
                       [[NSUserDefaults standardUserDefaults] synchronize];
-                      InvalidateAndReloadAllViews();
+                      NotifyTwitterStatusUpdated(nil, nil);
                   }]];
 
-                  [alert addAction:[UIAlertAction actionWithTitle:@"强制重绘当前界面" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                      InvalidateAndReloadAllViews();
+                  [alert addAction:[UIAlertAction actionWithTitle:@"强制广播刷新界面" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                      NotifyTwitterStatusUpdated(nil, nil);
                   }]];
 
                   [alert addAction:[UIAlertAction actionWithTitle:@"查看与导出运行日志" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
@@ -394,23 +463,29 @@ jobs:
                   gTranslationCache = [[NSCache alloc] init];
                   gTranslationCache.countLimit = 1000;
                   gPendingRequests = [[NSMutableSet alloc] init];
-                  gStatusMap = [NSMapTable strongToWeakObjectsMapTable];
+                  gStatusObjectMap = [NSMapTable strongToWeakObjectsMapTable];
 
                   gTranslateQueue = [[NSOperationQueue alloc] init];
                   gTranslateQueue.maxConcurrentOperationCount = 4;
 
-                  XLog(@"=== XAutoTranslate 深度注入版 启动 ===");
+                  XLog(@"=== XAutoTranslate (原生管线挂钩版) 启动 ===");
 
                   dispatch_async(dispatch_get_main_queue(), ^{
                       Class statusCls = objc_getClass("TFNTwitterStatus");
                       if (statusCls) {
                           HookMethod(statusCls, @selector(displayText), (IMP)hook_status_displayText, (IMP *)&orig_status_displayText);
-
-                          if ([statusCls instancesRespondToSelector:@selector(hasTranslation)]) {
-                              HookMethod(statusCls, @selector(hasTranslation), (IMP)hook_hasTranslation, (IMP *)&orig_hasTranslation);
-                          }
+                          HookMethod(statusCls, @selector(hasTranslation), (IMP)hook_status_hasTranslation, (IMP *)&orig_status_hasTranslation);
+                          HookMethod(statusCls, @selector(translation), (IMP)hook_status_translation, (IMP *)&orig_status_translation);
                       }
+
+                      // 挂钩 ViewModel 类
+                      HookAllTweetViewModels();
                       SetupFloatingButton();
+                  });
+
+                  // 延迟 2 秒二次巡检 ViewModel（防止冷启动子模块延迟加载）
+                  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                      HookAllTweetViewModels();
                   });
               }
           }
