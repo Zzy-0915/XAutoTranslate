@@ -19,9 +19,17 @@ jobs:
 
       - name: Setup iOS SDK
         run: |
-          curl -fsSL -o /tmp/iPhoneOS16.5.sdk.tar.xz https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz
-          tar -xf /tmp/iPhoneOS16.5.sdk.tar.xz -C ~/theos/sdks
-          rm /tmp/iPhoneOS16.5.sdk.tar.xz
+          git clone --depth=1 https://github.com/theos/sdks.git /tmp/theos-sdks
+          cp -r /tmp/theos-sdks/*.sdk ~/theos/sdks/
+          rm -rf /tmp/theos-sdks
+
+      - name: Prepare Source Files
+        run: |
+          # 自动统一为原生 Objective-C 格式
+          if [ -f Tweak.x ] && [ ! -f Tweak.m ]; then
+            mv Tweak.x Tweak.m
+          fi
+          ls -la
 
       - name: Build Dylib
         run: |
