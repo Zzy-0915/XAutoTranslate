@@ -1,13 +1,13 @@
-TARGET := iphone:clang:latest:16.0
-ARCHS := arm64e
-THEOS_PACKAGE_SCHEME := rootless
+TARGET := iphone:clang:latest:15.0
+ARCHS := arm64
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = XAutoTranslate
+LIBRARY_NAME = XAutoTranslate
 
-XAutoTranslate_FILES = Tweak.x
+XAutoTranslate_FILES = Tweak.m
 XAutoTranslate_CFLAGS = -fobjc-arc
 XAutoTranslate_FRAMEWORKS = UIKit Foundation
+XAutoTranslate_LDFLAGS = -Wl,-no_fixup_chains
 
-include $(THEOS_MAKE_PATH)/tweak.mk
+include $(THEOS_MAKE_PATH)/library.mk
