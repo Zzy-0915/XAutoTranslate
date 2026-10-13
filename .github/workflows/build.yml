@@ -1,4 +1,4 @@
-name: Build Tweak (.dylib & .deb)
+name: Build JailFools Dylib
 
 on:
   push:
@@ -12,36 +12,31 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
-        run: |
-          HOMEBREW_NO_AUTO_UPDATE=1 brew install dpkg ldid
-
       - name: Setup Theos
         run: |
           git clone --recursive https://github.com/theos/theos.git ~/theos
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
 
-      - name: Setup iOS 16.5 Patched SDK
+      - name: Setup iOS SDK
         run: |
           curl -fsSL -o /tmp/iPhoneOS16.5.sdk.tar.xz https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz
           tar -xf /tmp/iPhoneOS16.5.sdk.tar.xz -C ~/theos/sdks
           rm /tmp/iPhoneOS16.5.sdk.tar.xz
 
-      - name: Build Rootless Package
+      - name: Build Dylib
         run: |
           export THEOS=$HOME/theos
           make clean
-          make package FINALPACKAGE=1
+          make FINALPACKAGE=1
 
-      - name: Collect Output Files
+      - name: Collect Dylib
         run: |
           mkdir -p output
-          find .theos/obj -name "*.dylib" -exec cp {} output/ \; 2>/dev/null || true
-          find packages -name "*.deb" -exec cp {} output/ \; 2>/dev/null || true
+          find .theos/obj -name "*.dylib" -exec cp {} output/XAutoTranslate.dylib \;
           ls -la output/
 
-      - name: Upload Binaries
+      - name: Upload Dylib
         uses: actions/upload-artifact@v4
         with:
-          name: XAutoTranslate-Binaries
-          path: output/*
+          name: XAutoTranslate-JailFools
+          path: output/XAutoTranslate.dylib
