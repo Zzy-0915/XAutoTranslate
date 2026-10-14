@@ -7,7 +7,7 @@ LIBRARY_NAME = XAutoTranslate
 
 XAutoTranslate_FILES = Tweak.m
 XAutoTranslate_CFLAGS = -fobjc-arc
-XAutoTranslate_FRAMEWORKS = UIKit Foundation
+XAutoTranslate_FRAMEWORKS = UIKit Foundation CoreGraphics
 XAutoTranslate_LDFLAGS = -Wl,-no_fixup_chains
 
 include $(THEOS_MAKE_PATH)/library.mk

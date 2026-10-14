@@ -27,7 +27,7 @@ jobs:
           xcrun -sdk iphoneos clang -arch arm64 -dynamiclib \
             -miphoneos-version-min=15.0 \
             -fobjc-arc \
-            -framework Foundation -framework UIKit \
+            -framework Foundation -framework UIKit -framework CoreGraphics \
             -Wno-deprecated-declarations \
             -Wl,-no_fixup_chains \
             -o output/XAutoTranslate.dylib \
