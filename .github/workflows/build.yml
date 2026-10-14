@@ -1,4 +1,4 @@
-name: Build JailFools Dylib (Auto Click Engine)
+name: Build JailFools Dylib (Crash-Free Auto Clicker)
 
 on:
   push:
@@ -27,6 +27,7 @@ jobs:
           static NSLock *gLogLock = nil;
           static NSMutableSet<NSString *> *gHookedKeys = nil;
           static const char *kAutoClickedFlagKey = "kAutoClickedFlagKey";
+          static BOOL gAppFullyLaunched = NO; // 冷启动保护门禁
 
           static NSString *const kPrefAutoTranslateEnabled = @"XAutoTranslate_Enabled";
 
@@ -71,65 +72,69 @@ jobs:
               return ((id(*)(id, SEL))objc_msgSend)(obj, sel);
           }
 
-          // ==================== 核心：一键触发 T1TranslateButton 原生点击 ====================
-          static void TriggerNativeClickOnButton(UIView *btn) {
-              if (!IsAutoTranslateEnabled() || !btn || !btn.window) return;
+          // ==================== 安全自动点击核心引擎 ====================
+          static void SafeClickTranslateButton(UIView *btn) {
+              // 1. 冷启动未就绪或未挂载到主窗口前绝不触发，防止启动竞争闪退
+              if (!gAppFullyLaunched || !IsAutoTranslateEnabled() || !btn || !btn.window) return;
 
-              // 如果当前按钮已经在显示译文状态（或显示原文按钮），绝对不能点击，防止点回原文
-              BOOL isShowing = SafeCallBool(btn, NSSelectorFromString(@"showingTranslation"));
-              if (isShowing) return;
+              // 2. 状态检查：如果已经在显示译文，绝不点击
+              if (SafeCallBool(btn, NSSelectorFromString(@"showingTranslation"))) return;
 
+              // 3. 文字检查：严禁点击“显示原文”、“正在翻译”等状态按钮
               NSString *title = SafeCallObject(btn, NSSelectorFromString(@"titleText")) ?:
                                 SafeCallObject(btn, NSSelectorFromString(@"_t1_buttonTitle"));
-              if (title && ([title containsString:@"原文"] || [title containsString:@"Original"])) {
-                  return;
+              if (title) {
+                  if ([title containsString:@"原文"] || [title containsString:@"Original"] ||
+                      [title containsString:@"正在"] || [title containsString:@"Translating"] ||
+                      [title containsString:@"loading"] || [title containsString:@"Loading"]) {
+                      return;
+                  }
               }
 
-              // 防重检查（防止同一次展示死循环触发）
+              // 4. 防重检查：同一次展示仅触发一次
               if (objc_getAssociatedObject(btn, kAutoClickedFlagKey)) return;
               objc_setAssociatedObject(btn, kAutoClickedFlagKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-              XLog(@"[自动点击触发] 正在自动触发 T1TranslateButton 点击 (标题: %@)", title ?: @"显示翻译");
+              XLog(@"[安全触发] 正在自动触发 T1TranslateButton (标题: %@)", title ?: @"显示翻译");
 
               dispatch_async(dispatch_get_main_queue(), ^{
-                  BOOL curShowing = SafeCallBool(btn, NSSelectorFromString(@"showingTranslation"));
-                  if (curShowing) return;
+                  if (SafeCallBool(btn, NSSelectorFromString(@"showingTranslation"))) return;
 
-                  // 方式 1：调用官方私有点击入口 _didTap:forEvent:
-                  SEL didTapSel = NSSelectorFromString(@"_didTap:forEvent:");
-                  if ([btn respondsToSelector:didTapSel]) {
-                      ((void(*)(id, SEL, id, id))objc_msgSend)(btn, didTapSel, btn, nil);
-                      XLog(@"[自动点击成功] 已调用 _didTap:forEvent:");
-                  }
-
-                  // 方式 2：如果有 tapActionBlock，同时执行
+                  // 方案 A：优先调用 tapActionBlock（已验证最稳定原生通道）
                   if ([btn respondsToSelector:NSSelectorFromString(@"tapActionBlock")]) {
                       void (^block)(void) = ((id(*)(id, SEL))objc_msgSend)(btn, NSSelectorFromString(@"tapActionBlock"));
                       if (block) {
+                          XLog(@"[点击成功] 执行 tapActionBlock");
                           block();
-                          XLog(@"[自动点击成功] 已执行 tapActionBlock");
+                          return;
                       }
                   }
 
-                  // 方式 3：如果是 UIControl，发送点击事件
-                  if ([btn isKindOfClass:[UIControl class]]) {
-                      [(UIControl *)btn sendActionsForControlEvents:UIControlEventTouchUpInside];
+                  // 方案 B：iOS 官方公开无障碍点击接口 (VoiceOver 机制，绝对安全)
+                  if ([btn respondsToSelector:@selector(accessibilityActivate)]) {
+                      BOOL activated = [btn accessibilityActivate];
+                      if (activated) {
+                          XLog(@"[点击成功] 执行 accessibilityActivate");
+                          return;
+                      }
+                  }
+
+                  // 方案 C：触发挂载在当前按钮上的原生点击手势
+                  for (UIGestureRecognizer *gr in btn.gestureRecognizers) {
+                      if ([gr isKindOfClass:[UITapGestureRecognizer class]] || [NSStringFromClass([gr class]) containsString:@"Tap"]) {
+                          if (gr.enabled && (gr.state == UIGestureRecognizerStatePossible || gr.state == UIGestureRecognizerStateEnded)) {
+                              // 发送模拟手势事件
+                              SEL actSel = NSSelectorFromString(@"_tapAction");
+                              id target = SafeCallObject(btn, NSSelectorFromString(@"tappableViewHelper"));
+                              if (target && [target respondsToSelector:actSel]) {
+                                  XLog(@"[点击成功] 执行 tappableViewHelper _tapAction");
+                                  ((void(*)(id, SEL, id))objc_msgSend)(target, actSel, gr);
+                                  return;
+                              }
+                          }
+                      }
                   }
               });
-          }
-
-          // 递归在视图树中寻找并触发所有可见的 T1TranslateButton
-          static void ScanAndClickTranslateButtons(UIView *view) {
-              if (!view) return;
-
-              if ([NSStringFromClass([view class]) isEqualToString:@"T1TranslateButton"]) {
-                  TriggerNativeClickOnButton(view);
-                  return;
-              }
-
-              for (UIView *sub in view.subviews) {
-                  ScanAndClickTranslateButtons(sub);
-              }
           }
 
           // ==================== Hook 拦截点 ====================
@@ -143,10 +148,10 @@ jobs:
               }
           }
 
-          static void InstallClickHooks(void) {
+          static void InstallSafeHooks(void) {
               Class translateBtnCls = objc_getClass("T1TranslateButton");
               if (translateBtnCls) {
-                  // 1. 当按钮进入屏幕/挂载到窗口时触发
+                  // 1. 按钮挂载到时间线窗口并渲染完毕时，延迟 0.15 秒安全触发
                   SEL moveSel = @selector(didMoveToWindow);
                   if (CanHook(translateBtnCls, moveSel)) {
                       Method m = class_getInstanceMethod(translateBtnCls, moveSel);
@@ -155,8 +160,8 @@ jobs:
                           method_setImplementation(m, imp_implementationWithBlock(^void(UIView *self) {
                               ((void(*)(id, SEL))orig)(self, moveSel);
                               if (self.window) {
-                                  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                      TriggerNativeClickOnButton(self);
+                                  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                                      SafeClickTranslateButton(self);
                                   });
                               }
                           }));
@@ -164,7 +169,7 @@ jobs:
                       }
                   }
 
-                  // 2. 当按钮设置文字时（每次复用成“显示翻译”时重置并触发）
+                  // 2. 按钮复用并重新设定为“显示翻译”时，重置防重状态并自动触发
                   SEL setTitleSel = NSSelectorFromString(@"setTitleText:");
                   if (CanHook(translateBtnCls, setTitleSel)) {
                       Method m = class_getInstanceMethod(translateBtnCls, setTitleSel);
@@ -173,35 +178,18 @@ jobs:
                           method_setImplementation(m, imp_implementationWithBlock(^void(UIView *self, NSString *text) {
                               ((void(*)(id, SEL, id))orig)(self, setTitleSel, text);
                               if (text && ([text containsString:@"翻译"] || [text containsString:@"Translate"])) {
-                                  // 重置点击标记，允许对新推文重新点击
                                   objc_setAssociatedObject(self, kAutoClickedFlagKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                                  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                      TriggerNativeClickOnButton(self);
+                                  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                                      SafeClickTranslateButton(self);
                                   });
                               }
                           }));
                           XLog(@"[Hook成功] T1TranslateButton -> setTitleText:");
                       }
                   }
-
-                  // 3. 当按钮完成排版布局时触发
-                  SEL layoutSel = @selector(layoutSubviews);
-                  if (CanHook(translateBtnCls, layoutSel)) {
-                      Method m = class_getInstanceMethod(translateBtnCls, layoutSel);
-                      if (m) {
-                          IMP orig = method_getImplementation(m);
-                          method_setImplementation(m, imp_implementationWithBlock(^void(UIView *self) {
-                              ((void(*)(id, SEL))orig)(self, layoutSel);
-                              if (self.window) {
-                                  TriggerNativeClickOnButton(self);
-                              }
-                          }));
-                          XLog(@"[Hook成功] T1TranslateButton -> layoutSubviews");
-                      }
-                  }
               }
 
-              // 保持对时间线排版与 Grok 适配器的解锁，确保“显示翻译”持续存在于时间线上
+              // 保持解锁时间线上的“显示翻译”按钮显示
               Class grokHelperCls = objc_getClass("T1GrokPostTranslationDisplayHelper");
               if (grokHelperCls) {
                   SEL mBtnSel = NSSelectorFromString(@"shouldDisplayManualTranslateButton");
@@ -325,7 +313,7 @@ jobs:
               }]];
 
               [logAlert addAction:[UIAlertAction actionWithTitle:@"导出为 TXT 文件" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                  NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"XAutoTranslate_Click.log"];
+                  NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"XAutoTranslate_ClickSafe.log"];
                   [fullLog writeToFile:tmpPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
                   NSURL *fileURL = [NSURL fileURLWithPath:tmpPath];
                   UIActivityViewController *actVC = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL] applicationActivities:nil];
@@ -351,7 +339,7 @@ jobs:
 
                   NSString *title = [NSString stringWithFormat:@"原生全自动翻译 (当前: %@)", isEnabled ? @"✅ 开启" : @"❌ 关闭"];
                   UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
-                                                                                 message:@"时间线外语推文自动秒点翻译"
+                                                                                 message:@"时间线外语推文安全自动触发"
                                                                           preferredStyle:UIAlertControllerStyleActionSheet];
 
                   [alert addAction:[UIAlertAction actionWithTitle:(isEnabled ? @"暂停自动点击" : @"开启自动点击")
@@ -359,12 +347,6 @@ jobs:
                                                            handler:^(UIAlertAction *action) {
                       [[NSUserDefaults standardUserDefaults] setBool:!isEnabled forKey:kPrefAutoTranslateEnabled];
                       [[NSUserDefaults standardUserDefaults] synchronize];
-                  }]];
-
-                  [alert addAction:[UIAlertAction actionWithTitle:@"立即扫描并点击当前屏幕所有翻译按钮" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                      for (UIWindow *w in [UIApplication sharedApplication].windows) {
-                          ScanAndClickTranslateButtons(w);
-                      }
                   }]];
 
                   [alert addAction:[UIAlertAction actionWithTitle:@"查看与导出运行日志" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
@@ -377,7 +359,7 @@ jobs:
           }
 
           static void SetupFloatingButton(void) {
-              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                   UIWindow *window = nil;
                   for (UIWindow *w in [UIApplication sharedApplication].windows) {
                       if (w.isKeyWindow) { window = w; break; }
@@ -401,33 +383,24 @@ jobs:
               });
           }
 
-          // ==================== 构造入口与全局定时巡检器 ====================
+          // ==================== 构造入口与就绪门禁 ====================
           __attribute__((constructor)) static void initTweak(void) {
               @autoreleasepool {
                   gLogList = [[NSMutableArray alloc] init];
                   gLogLock = [[NSLock alloc] init];
                   gHookedKeys = [[NSMutableSet alloc] init];
 
-                  XLog(@"=== XAutoTranslate (全自动点击引擎版) 启动 ===");
+                  XLog(@"=== XAutoTranslate (安全防闪退版) 启动 ===");
 
                   dispatch_async(dispatch_get_main_queue(), ^{
-                      InstallClickHooks();
+                      InstallSafeHooks();
                       SetupFloatingButton();
                   });
 
+                  // 核心冷启动保护：等待 App 启动 2.0 秒后才开启自动点击，杜绝误触抽屉和启动期闪退
                   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                      InstallClickHooks();
-                  });
-
-                  // 启动轻量级雷达定时器（每 0.8 秒巡检当前窗口，发现可视的“显示翻译”立即点击）
-                  dispatch_async(dispatch_get_main_queue(), ^{
-                      [NSTimer scheduledTimerWithTimeInterval:0.8 repeats:YES block:^(NSTimer * _Nonnull timer) {
-                          if (IsAutoTranslateEnabled()) {
-                              for (UIWindow *w in [UIApplication sharedApplication].windows) {
-                                  ScanAndClickTranslateButtons(w);
-                              }
-                          }
-                      }];
+                      gAppFullyLaunched = YES;
+                      XLog(@"[安全门禁] X 主界面完全就绪，自动点击功能已激活");
                   });
               }
           }
