@@ -1,4 +1,4 @@
-name: Build JailFools Dylib (Native Pipeline Hook)
+name: Build JailFools Dylib (Native Timeline Auto-Trigger)
 
 on:
   push:
@@ -22,35 +22,14 @@ jobs:
           #import <objc/runtime.h>
           #import <objc/message.h>
 
-          // ==================== 原生翻译数据模型代理 ====================
-          @interface XTranslationModel : NSObject
-          @property (nonatomic, copy) NSString *text;
-          @property (nonatomic, copy) NSString *translation;
-          @property (nonatomic, copy) NSString *displayText;
-          @property (nonatomic, copy) NSString *sourceLanguage;
-          @property (nonatomic, copy) NSString *localizedLanguage;
-          @property (nonatomic, copy) NSString *localizedSourceLanguage;
-          @end
-
-          @implementation XTranslationModel
-          - (NSString *)text { return _text ?: @""; }
-          - (NSString *)translation { return _text ?: @""; }
-          - (NSString *)displayText { return _text ?: @""; }
-          - (NSString *)sourceLanguage { return @"auto"; }
-          - (NSString *)localizedLanguage { return @"zh-CN"; }
-          - (NSString *)localizedSourceLanguage { return @"外语"; }
-          @end
-
-          // ==================== 全局状态与日志管理器 ====================
           static NSMutableArray<NSString *> *gLogList = nil;
           static NSLock *gLogLock = nil;
-          static NSCache<NSString *, XTranslationModel *> *gTranslationCache = nil;
-          static NSMutableSet<NSString *> *gPendingRequests = nil;
-          static NSOperationQueue *gTranslateQueue = nil;
-          static NSMapTable<NSString *, id> *gStatusObjectMap = nil;
+          static NSMutableSet<NSString *> *gHookedKeys = nil;
+          static NSMutableSet<NSString *> *gTriggeredTweetIDs = nil;
 
           static NSString *const kPrefAutoTranslateEnabled = @"XAutoTranslate_Enabled";
-          static NSString *const kPrefTranslationMode = @"XAutoTranslate_Mode";
+          static const char *kGestureTargetsKey = "kXGestureTargetsKey";
+          static const char *kViewTriggeredKey = "kXViewTriggeredKey";
 
           static void XLog(NSString *format, ...) {
               va_list args;
@@ -68,7 +47,7 @@ jobs:
               [gLogLock lock];
               if (!gLogList) gLogList = [NSMutableArray array];
               [gLogList addObject:logEntry];
-              if (gLogList.count > 600) [gLogList removeObjectAtIndex:0];
+              if (gLogList.count > 800) [gLogList removeObjectAtIndex:0];
               [gLogLock unlock];
           }
 
@@ -77,263 +56,386 @@ jobs:
               return val ? [val boolValue] : YES;
           }
 
-          static NSInteger GetTranslationMode(void) {
-              return [[NSUserDefaults standardUserDefaults] integerForKey:kPrefTranslationMode];
+          static BOOL IsAlreadyChineseText(NSString *text) {
+              if (!text || text.length == 0) return YES;
+              NSUInteger hanziCount = 0;
+              NSUInteger alphaCount = 0;
+
+              for (NSUInteger i = 0; i < text.length; i++) {
+                  unichar c = [text characterAtIndex:i];
+                  if ((c >= 0x3040 && c <= 0x30FF) || (c >= 0xFF66 && c <= 0xFF9F) ||
+                      (c >= 0xAC00 && c <= 0xD7AF) || (c >= 0x0E00 && c <= 0x0E7F) ||
+                      (c >= 0x0600 && c <= 0x06FF) || (c >= 0x0400 && c <= 0x04FF)) {
+                      return NO;
+                  }
+                  if (c >= 0x4E00 && c <= 0x9FFF) {
+                      hanziCount++;
+                  } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+                      alphaCount++;
+                  }
+              }
+              if (hanziCount == 0) return NO;
+              if (hanziCount >= 2 && hanziCount * 3 >= alphaCount) return YES;
+              return NO;
           }
 
-          // 核心广播：向 X 官方总线发送更新事件，迫使时间线重排
-          static void NotifyTwitterStatusUpdated(id status, NSString *statusID) {
-              dispatch_async(dispatch_get_main_queue(), ^{
-                  // 1. 广播官方状态更新通知
-                  [[NSNotificationCenter defaultCenter] postNotificationName:@"TFNTwitterStatusDidUpdateNotification"
-                                                                      object:status
-                                                                    userInfo:statusID ? @{@"statusID": statusID} : nil];
-                  [[NSNotificationCenter defaultCenter] postNotificationName:@"T1StatusDidUpdateNotification"
-                                                                      object:status];
+          static id SafeCallZeroArgObject(id obj, SEL sel) {
+              if (!obj || ![obj respondsToSelector:sel]) return nil;
+              NSMethodSignature *sig = [obj methodSignatureForSelector:sel];
+              if (!sig || sig.numberOfArguments != 2 || sig.methodReturnType[0] != '@') return nil;
+              return ((id(*)(id, SEL))objc_msgSend)(obj, sel);
+          }
 
-                  // 2. 遍历视图，清空 CollectionView 布局缓存
-                  UIWindow *targetWindow = nil;
-                  for (UIWindow *w in [UIApplication sharedApplication].windows) {
-                      if (w.isKeyWindow) { targetWindow = w; break; }
+          static BOOL SafeCallZeroArgBool(id obj, SEL sel) {
+              if (!obj || ![obj respondsToSelector:sel]) return NO;
+              NSMethodSignature *sig = [obj methodSignatureForSelector:sel];
+              if (!sig || sig.numberOfArguments != 2) return NO;
+              char ret = sig.methodReturnType[0];
+              if (ret != 'B' && ret != 'c') return NO;
+              return ((BOOL(*)(id, SEL))objc_msgSend)(obj, sel);
+          }
+
+          static NSString *ExtractTweetID(id vmOrStatus) {
+              if (!vmOrStatus) return nil;
+              NSArray *idSelectors = @[@"statusIDString", @"statusID", @"tweetIDString"];
+              for (NSString *selName in idSelectors) {
+                  SEL sel = NSSelectorFromString(selName);
+                  if ([vmOrStatus respondsToSelector:sel]) {
+                      NSMethodSignature *sig = [vmOrStatus methodSignatureForSelector:sel];
+                      if (sig && sig.numberOfArguments == 2) {
+                          if (sig.methodReturnType[0] == '@') {
+                              id val = ((id(*)(id, SEL))objc_msgSend)(vmOrStatus, sel);
+                              if ([val isKindOfClass:[NSString class]] && [(NSString *)val length] > 0) return val;
+                          } else if (sig.methodReturnType[0] == 'q' || sig.methodReturnType[0] == 'Q') {
+                              long long val = ((long long(*)(id, SEL))objc_msgSend)(vmOrStatus, sel);
+                              if (val > 0) return [NSString stringWithFormat:@"%lld", val];
+                          }
+                      }
                   }
-                  if (!targetWindow) targetWindow = [UIApplication sharedApplication].windows.firstObject;
+              }
+              id innerStatus = SafeCallZeroArgObject(vmOrStatus, NSSelectorFromString(@"status"));
+              if (innerStatus && innerStatus != vmOrStatus) {
+                  return ExtractTweetID(innerStatus);
+              }
+              return [NSString stringWithFormat:@"%p", vmOrStatus];
+          }
 
-                  void (^__block reloadSubviews)(UIView *) = ^(UIView *v) {
-                      if ([v isKindOfClass:[UICollectionView class]]) {
-                          UICollectionView *cv = (UICollectionView *)v;
-                          [cv.collectionViewLayout invalidateLayout];
-                          [cv reloadData];
-                      } else if ([v isKindOfClass:[UITableView class]]) {
-                          [((UITableView *)v) reloadData];
+          static BOOL ShouldTranslateViewModel(id vmOrStatus) {
+              if (!IsAutoTranslateEnabled() || !vmOrStatus) return NO;
+
+              if (SafeCallZeroArgBool(vmOrStatus, NSSelectorFromString(@"isShowingTranslation")) ||
+                  SafeCallZeroArgBool(vmOrStatus, NSSelectorFromString(@"isTranslated"))) {
+                  return NO;
+              }
+
+              NSString *lang = SafeCallZeroArgObject(vmOrStatus, NSSelectorFromString(@"primaryLanguage")) ?:
+                               SafeCallZeroArgObject(vmOrStatus, NSSelectorFromString(@"language"));
+              if ([lang isKindOfClass:[NSString class]] && ([lang hasPrefix:@"zh"] || [lang isEqualToString:@"und"])) {
+                  return NO;
+              }
+
+              NSString *text = SafeCallZeroArgObject(vmOrStatus, NSSelectorFromString(@"displayText")) ?:
+                               SafeCallZeroArgObject(vmOrStatus, NSSelectorFromString(@"primaryText")) ?:
+                               SafeCallZeroArgObject(vmOrStatus, NSSelectorFromString(@"text"));
+              if (!text) {
+                  id subStatus = SafeCallZeroArgObject(vmOrStatus, NSSelectorFromString(@"status"));
+                  if (subStatus) {
+                      text = SafeCallZeroArgObject(subStatus, NSSelectorFromString(@"displayText"));
+                  }
+              }
+              if ([text isKindOfClass:[NSString class]]) {
+                  if (text.length < 3 || IsAlreadyChineseText(text)) return NO;
+              }
+              return YES;
+          }
+
+          static BOOL FireNativeTriggerInView(UIView *view) {
+              if (!view) return NO;
+              BOOL triggered = NO;
+
+              if ([view isKindOfClass:[UIControl class]]) {
+                  UIControl *ctrl = (UIControl *)view;
+                  if (ctrl.allTargets.count > 0) {
+                      [ctrl sendActionsForControlEvents:UIControlEventTouchUpInside];
+                      XLog(@"[原生触发] 已触发 UIControl 点击: %@", NSStringFromClass([view class]));
+                      triggered = YES;
+                  }
+              }
+
+              NSString *clsName = NSStringFromClass([view class]);
+              if ([clsName containsString:@"AttributedTextView"]) {
+                  id delegate = SafeCallZeroArgObject(view, NSSelectorFromString(@"delegate"));
+                  NSArray *ranges = SafeCallZeroArgObject(view, NSSelectorFromString(@"activeRanges"));
+                  SEL tapSel = NSSelectorFromString(@"attributedTextView:didTapRange:withAttributes:");
+                  if (delegate && [delegate respondsToSelector:tapSel] && [ranges isKindOfClass:[NSArray class]] && ranges.count > 0) {
+                      ((void(*)(id, SEL, id, id, id))objc_msgSend)(delegate, tapSel, view, ranges.firstObject, @{});
+                      XLog(@"[原生触发] 已触发富文本翻译链接代理: %@", NSStringFromClass([delegate class]));
+                      triggered = YES;
+                  }
+              }
+
+              for (UIGestureRecognizer *gr in view.gestureRecognizers) {
+                  if ([gr isKindOfClass:[UITapGestureRecognizer class]] || [NSStringFromClass([gr class]) containsString:@"Tap"]) {
+                      NSArray *pairs = objc_getAssociatedObject(gr, kGestureTargetsKey);
+                      for (NSDictionary *pair in pairs) {
+                          NSValue *targetVal = pair[@"target"];
+                          NSString *actionStr = pair[@"action"];
+                          id target = [targetVal nonretainedObjectValue];
+                          SEL action = NSSelectorFromString(actionStr);
+                          if (target && action && [target respondsToSelector:action]) {
+                              ((void(*)(id, SEL, id))objc_msgSend)(target, action, gr);
+                              XLog(@"[原生触发] 已执行手势回调: [%@ %@]", NSStringFromClass([target class]), actionStr);
+                              triggered = YES;
+                          }
                       }
-                      for (UIView *sub in v.subviews) {
-                          reloadSubviews(sub);
+                  }
+              }
+
+              for (UIView *sub in view.subviews) {
+                  if (FireNativeTriggerInView(sub)) {
+                      triggered = YES;
+                  }
+              }
+              return triggered;
+          }
+
+          static void AutoInvokeNativeTranslation(id adapter, UIView *view, id viewModel) {
+              if (!IsAutoTranslateEnabled()) return;
+              if (viewModel && !ShouldTranslateViewModel(viewModel)) return;
+
+              NSString *tid = ExtractTweetID(viewModel ?: view);
+              if (tid) {
+                  @synchronized (gTriggeredTweetIDs) {
+                      if ([gTriggeredTweetIDs containsObject:tid]) return;
+                      [gTriggeredTweetIDs addObject:tid];
+                  }
+              }
+
+              dispatch_async(dispatch_get_main_queue(), ^{
+                  BOOL didFire = NO;
+
+                  if (adapter) {
+                      unsigned int count = 0;
+                      Method *methods = class_copyMethodList([adapter class], &count);
+                      for (unsigned int i = 0; i < count; i++) {
+                          SEL sel = method_getName(methods[i]);
+                          NSString *selName = NSStringFromSelector(sel);
+                          if (([selName containsString:@"Tap"] || [selName containsString:@"tap"] ||
+                               [selName hasPrefix:@"translate"] || [selName hasPrefix:@"_t1_translate"]) &&
+                              ![selName containsString:@"should"] && ![selName containsString:@"is"]) {
+                              NSMethodSignature *sig = [adapter methodSignatureForSelector:sel];
+                              if (sig && sig.methodReturnType[0] == 'v') {
+                                  if (sig.numberOfArguments == 2) {
+                                      ((void(*)(id, SEL))objc_msgSend)(adapter, sel);
+                                      XLog(@"[原生触发] 调用 Adapter 无参方法: [%@ %@]", NSStringFromClass([adapter class]), selName);
+                                      didFire = YES;
+                                      break;
+                                  } else if (sig.numberOfArguments == 3 && [sig getArgumentTypeAtIndex:2][0] == '@') {
+                                      id arg = view ?: viewModel;
+                                      ((void(*)(id, SEL, id))objc_msgSend)(adapter, sel, arg);
+                                      XLog(@"[原生触发] 调用 Adapter 单参方法: [%@ %@]", NSStringFromClass([adapter class]), selName);
+                                      didFire = YES;
+                                      break;
+                                  }
+                              }
+                          }
                       }
-                  };
-                  if (targetWindow) reloadSubviews(targetWindow);
+                      if (methods) free(methods);
+                  }
+
+                  if (!didFire && view) {
+                      didFire = FireNativeTriggerInView(view);
+                  }
+
+                  if (viewModel) {
+                      NSArray *vmTriggers = @[@"translate", @"translateStatus", @"fetchTranslation", @"loadTranslation", @"toggleTranslation", @"requestTranslation"];
+                      for (NSString *tName in vmTriggers) {
+                          SEL sel = NSSelectorFromString(tName);
+                          if ([viewModel respondsToSelector:sel]) {
+                              NSMethodSignature *sig = [viewModel methodSignatureForSelector:sel];
+                              if (sig && sig.numberOfArguments == 2 && sig.methodReturnType[0] == 'v') {
+                                  ((void(*)(id, SEL))objc_msgSend)(viewModel, sel);
+                                  XLog(@"[原生触发] 调用 ViewModel 方法: [%@ %@]", NSStringFromClass([viewModel class]), tName);
+                                  didFire = YES;
+                              }
+                          }
+                      }
+                  }
               });
           }
 
-          // 异步翻译逻辑
-          static void RequestTranslation(NSString *text, NSString *statusID) {
-              if (!text || text.length == 0 || !statusID) return;
-
-              @synchronized (gPendingRequests) {
-                  if ([gPendingRequests containsObject:statusID]) return;
-                  [gPendingRequests addObject:statusID];
+          static BOOL CanHookClassSelector(Class cls, SEL sel) {
+              if (!cls || !sel) return NO;
+              NSString *key = [NSString stringWithFormat:@"%@::%@", NSStringFromClass(cls), NSStringFromSelector(sel)];
+              @synchronized (gHookedKeys) {
+                  if ([gHookedKeys containsObject:key]) return NO;
+                  [gHookedKeys addObject:key];
+                  return YES;
               }
+          }
 
-              XLog(@"[发起翻译] ID: %@ -> 原文: %.20@...", statusID, text);
-
-              [gTranslateQueue addOperationWithBlock:^{
-                  NSMutableCharacterSet *allowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
-                  [allowed removeCharactersInString:@"#+&?="];
-                  NSString *encodedText = [text stringByAddingPercentEncodingWithAllowedCharacters:allowed];
-
-                  NSString *urlString = [NSString stringWithFormat:@"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=%@", encodedText];
-                  NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlString]];
-                  [request setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X)" forHTTPHeaderField:@"User-Agent"];
-                  request.timeoutInterval = 12.0;
-
-                  NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-                      @synchronized (gPendingRequests) {
-                          [gPendingRequests removeObject:statusID];
-                      }
-
-                      if (error || !data) {
-                          XLog(@"[网络错误] %@", error ? error.localizedDescription : @"无数据");
-                          return;
-                      }
-
-                      NSString *translatedResult = nil;
-                      @try {
-                          id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                          if ([json isKindOfClass:[NSArray class]] && [json count] > 0) {
-                              NSArray *segments = json[0];
-                              NSMutableString *full = [NSMutableString string];
-                              if ([segments isKindOfClass:[NSArray class]]) {
-                                  for (id seg in segments) {
-                                      if ([seg isKindOfClass:[NSArray class]] && [seg count] > 0) {
-                                          id part = seg[0];
-                                          if ([part isKindOfClass:[NSString class]]) {
-                                              [full appendString:(NSString *)part];
-                                          }
-                                      }
-                                  }
-                              }
-                              if (full.length > 0) {
-                                  translatedResult = [full copy];
-                              }
+          static void HookGestureRecognizers(void) {
+              Class grCls = [UIGestureRecognizer class];
+              SEL initSel = @selector(initWithTarget:action:);
+              if (CanHookClassSelector(grCls, initSel)) {
+                  Method m = class_getInstanceMethod(grCls, initSel);
+                  if (m) {
+                      IMP origIMP = method_getImplementation(m);
+                      IMP newIMP = imp_implementationWithBlock(^id(id self, id target, SEL action) {
+                          id instance = ((id(*)(id, SEL, id, SEL))origIMP)(self, initSel, target, action);
+                          if (instance && target && action) {
+                              NSMutableArray *arr = objc_getAssociatedObject(instance, kGestureTargetsKey) ?: [NSMutableArray array];
+                              [arr addObject:@{@"target": [NSValue valueWithNonretainedObject:target], @"action": NSStringFromSelector(action)}];
+                              objc_setAssociatedObject(instance, kGestureTargetsKey, arr, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                           }
-                      } @catch (NSException *e) {
-                          XLog(@"[解析错误] %@", e.reason);
-                      }
+                          return instance;
+                      });
+                      method_setImplementation(m, newIMP);
+                  }
+              }
 
-                      if (translatedResult && translatedResult.length > 0) {
-                          XLog(@"[成功获取译文] ID: %@ -> 译文: %.25@...", statusID, translatedResult);
-
-                          XTranslationModel *model = [[XTranslationModel alloc] init];
-                          model.text = translatedResult;
-                          [gTranslationCache setObject:model forKey:statusID];
-
-                          id cachedStatus = nil;
-                          @synchronized (gStatusObjectMap) {
-                              cachedStatus = [gStatusObjectMap objectForKey:statusID];
+              SEL addSel = @selector(addTarget:action:);
+              if (CanHookClassSelector(grCls, addSel)) {
+                  Method m = class_getInstanceMethod(grCls, addSel);
+                  if (m) {
+                      IMP origIMP = method_getImplementation(m);
+                      IMP newIMP = imp_implementationWithBlock(^void(id self, id target, SEL action) {
+                          ((void(*)(id, SEL, id, SEL))origIMP)(self, addSel, target, action);
+                          if (target && action) {
+                              NSMutableArray *arr = objc_getAssociatedObject(self, kGestureTargetsKey) ?: [NSMutableArray array];
+                              [arr addObject:@{@"target": [NSValue valueWithNonretainedObject:target], @"action": NSStringFromSelector(action)}];
+                              objc_setAssociatedObject(self, kGestureTargetsKey, arr, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                           }
-
-                          // 派发原生更新广播
-                          NotifyTwitterStatusUpdated(cachedStatus, statusID);
-                      }
-                  }];
-                  [task resume];
-              }];
-          }
-
-          // 提取对象的 statusID
-          static NSString *GetStatusIDFromObject(id obj) {
-              if (!obj) return nil;
-              if ([obj respondsToSelector:@selector(statusIDString)]) {
-                  NSString *sid = ((NSString *(*)(id, SEL))objc_msgSend)(obj, @selector(statusIDString));
-                  if (sid && sid.length > 0) return sid;
-              }
-              if ([obj respondsToSelector:@selector(statusID)]) {
-                  long long sidVal = ((long long (*)(id, SEL))objc_msgSend)(obj, @selector(statusID));
-                  if (sidVal != 0) return [NSString stringWithFormat:@"%lld", sidVal];
-              }
-              if ([obj respondsToSelector:@selector(status)]) {
-                  id subStatus = ((id (*)(id, SEL))objc_msgSend)(obj, @selector(status));
-                  return GetStatusIDFromObject(subStatus);
-              }
-              return nil;
-          }
-
-          // ==================== Hook 注入点 ====================
-
-          // Hook: TFNTwitterStatus translation 属性
-          static id (*orig_status_translation)(id, SEL) = NULL;
-          static id hook_status_translation(id self, SEL _cmd) {
-              if (IsAutoTranslateEnabled()) {
-                  NSString *sid = GetStatusIDFromObject(self);
-                  if (sid) {
-                      XTranslationModel *cached = [gTranslationCache objectForKey:sid];
-                      if (cached) return cached;
+                      });
+                      method_setImplementation(m, newIMP);
                   }
               }
-              return orig_status_translation ? orig_status_translation(self, _cmd) : nil;
           }
 
-          // Hook: TFNTwitterStatus hasTranslation 判定
-          static BOOL (*orig_status_hasTranslation)(id, SEL) = NULL;
-          static BOOL hook_status_hasTranslation(id self, SEL _cmd) {
-              if (IsAutoTranslateEnabled()) {
-                  NSString *sid = GetStatusIDFromObject(self);
-                  if (sid && [gTranslationCache objectForKey:sid]) {
-                      return YES;
-                  }
-              }
-              return orig_status_hasTranslation ? orig_status_hasTranslation(self, _cmd) : NO;
-          }
-
-          // Hook: TFNTwitterStatus displayText（数据捕获与双语合成）
-          static NSString *(*orig_status_displayText)(id, SEL) = NULL;
-          static NSString *hook_status_displayText(id self, SEL _cmd) {
-              NSString *orig = orig_status_displayText ? orig_status_displayText(self, _cmd) : nil;
-              if (!IsAutoTranslateEnabled() || !orig || orig.length == 0) return orig;
-
-              NSString *sid = GetStatusIDFromObject(self);
-              if (sid && ![sid isEqualToString:@"0"]) {
-                  @synchronized (gStatusObjectMap) {
-                      [gStatusObjectMap setObject:self forKey:sid];
-                  }
-
-                  XTranslationModel *cached = [gTranslationCache objectForKey:sid];
-                  if (cached) {
-                      if ([cached.text isEqualToString:orig]) return orig;
-                      if (GetTranslationMode() == 1) {
-                          return cached.text; // 纯中文模式
-                      }
-                      return [NSString stringWithFormat:@"%@\n\n🇨🇳 [自动翻译]\n%@", orig, cached.text];
-                  }
-
-                  RequestTranslation(orig, sid);
-              }
-              return orig;
-          }
-
-          // Hook: T1TweetViewModel 原生翻译开关
-          static BOOL (*orig_vm_shouldShowTranslation)(id, SEL) = NULL;
-          static BOOL hook_vm_shouldShowTranslation(id self, SEL _cmd) {
-              if (IsAutoTranslateEnabled()) {
-                  NSString *sid = GetStatusIDFromObject(self);
-                  if (sid && [gTranslationCache objectForKey:sid]) {
-                      return YES;
-                  }
-              }
-              return orig_vm_shouldShowTranslation ? orig_vm_shouldShowTranslation(self, _cmd) : NO;
-          }
-
-          static BOOL (*orig_vm_hasTranslation)(id, SEL) = NULL;
-          static BOOL hook_vm_hasTranslation(id self, SEL _cmd) {
-              if (IsAutoTranslateEnabled()) {
-                  NSString *sid = GetStatusIDFromObject(self);
-                  if (sid && [gTranslationCache objectForKey:sid]) {
-                      return YES;
-                  }
-              }
-              return orig_vm_hasTranslation ? orig_vm_hasTranslation(self, _cmd) : NO;
-          }
-
-          static id (*orig_vm_translation)(id, SEL) = NULL;
-          static id hook_vm_translation(id self, SEL _cmd) {
-              if (IsAutoTranslateEnabled()) {
-                  NSString *sid = GetStatusIDFromObject(self);
-                  if (sid) {
-                      XTranslationModel *cached = [gTranslationCache objectForKey:sid];
-                      if (cached) return cached;
-                  }
-              }
-              return orig_vm_translation ? orig_vm_translation(self, _cmd) : nil;
-          }
-
-          static void HookMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
-              if (!cls) return;
-              Method m = class_getInstanceMethod(cls, sel);
-              if (m) {
-                  *origImp = method_getImplementation(m);
-                  method_setImplementation(m, newImp);
-                  XLog(@"[Hook成功] %@ -> %@", NSStringFromClass(cls), NSStringFromSelector(sel));
-              }
-          }
-
-          // 动态类遍历探测与挂钩
-          static void HookAllTweetViewModels(void) {
+          static void ScanAndHookNativeTranslation(void) {
               int numClasses = objc_getClassList(NULL, 0);
+              if (numClasses <= 0) return;
               Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
               numClasses = objc_getClassList(classes, numClasses);
 
               for (int i = 0; i < numClasses; i++) {
-                  const char *name = class_getName(classes[i]);
-                  if (!name) continue;
-                  // 匹配 T1TweetViewModel 或 Swift 重整类名
-                  if (strstr(name, "TweetViewModel")) {
-                      Class vmCls = classes[i];
-                      XLog(@"[发现 ViewModel 类] %s", name);
+                  Class cls = classes[i];
+                  const char *rawName = class_getName(cls);
+                  if (!rawName) continue;
 
-                      if ([vmCls instancesRespondToSelector:@selector(shouldShowTranslation)]) {
-                          HookMethod(vmCls, @selector(shouldShowTranslation), (IMP)hook_vm_shouldShowTranslation, (IMP *)&orig_vm_shouldShowTranslation);
+                  if (strncmp(rawName, "T1", 2) != 0 &&
+                      strncmp(rawName, "TFN", 3) != 0 &&
+                      strncmp(rawName, "TFS", 3) != 0 &&
+                      strncmp(rawName, "_TtC", 4) != 0) {
+                      continue;
+                  }
+
+                  NSString *clsName = [NSString stringWithUTF8String:rawName];
+                  BOOL isTranslateClass = ([clsName rangeOfString:@"Translat" options:NSCaseInsensitiveSearch].location != NSNotFound);
+                  BOOL isStatusOrVMClass = ([clsName isEqualToString:@"TFNTwitterStatus"] ||
+                                            [clsName containsString:@"StatusViewModel"] ||
+                                            [clsName containsString:@"TweetViewModel"]);
+
+                  if (!isTranslateClass && !isStatusOrVMClass) continue;
+
+                  unsigned int methodCount = 0;
+                  Method *methods = class_copyMethodList(cls, &methodCount);
+
+                  for (unsigned int j = 0; j < methodCount; j++) {
+                      Method m = methods[j];
+                      SEL sel = method_getName(m);
+                      NSString *selName = NSStringFromSelector(sel);
+                      const char *typeEnc = method_getTypeEncoding(m);
+                      if (!typeEnc) continue;
+
+                      BOOL isTranslateSel = ([selName rangeOfString:@"translat" options:NSCaseInsensitiveSearch].location != NSNotFound);
+
+                      if (isTranslateClass || isTranslateSel) {
+                          XLog(@"[发现原生符号] %@ -> %@ (%s)", clsName, selName, typeEnc);
                       }
-                      if ([vmCls instancesRespondToSelector:@selector(hasTranslation)]) {
-                          HookMethod(vmCls, @selector(hasTranslation), (IMP)hook_vm_hasTranslation, (IMP *)&orig_vm_hasTranslation);
+
+                      if (isTranslateClass && ([selName isEqualToString:@"shouldBeVisibleForViewModel:"] ||
+                                               [selName isEqualToString:@"isVisibleForViewModel:"])) {
+                          if (CanHookClassSelector(cls, sel)) {
+                              IMP origIMP = method_getImplementation(m);
+                              IMP newIMP = imp_implementationWithBlock(^BOOL(id self, id viewModel) {
+                                  if (IsAutoTranslateEnabled() && ShouldTranslateViewModel(viewModel)) {
+                                      return YES;
+                                  }
+                                  return ((BOOL(*)(id, SEL, id))origIMP)(self, sel, viewModel);
+                              });
+                              method_setImplementation(m, newIMP);
+                              XLog(@"[Hook成功-解除时间线隐藏] [%@ %@]", clsName, selName);
+                          }
                       }
-                      if ([vmCls instancesRespondToSelector:@selector(translation)]) {
-                          HookMethod(vmCls, @selector(translation), (IMP)hook_vm_translation, (IMP *)&orig_vm_translation);
+
+                      if (isTranslateClass && [selName isEqualToString:@"viewModel:didUpdateWithInfo:forView:"]) {
+                          if (CanHookClassSelector(cls, sel)) {
+                              IMP origIMP = method_getImplementation(m);
+                              IMP newIMP = imp_implementationWithBlock(^void(id self, id viewModel, id info, UIView *view) {
+                                  ((void(*)(id, SEL, id, id, UIView *))origIMP)(self, sel, viewModel, info, view);
+                                  AutoInvokeNativeTranslation(self, view, viewModel);
+                              });
+                              method_setImplementation(m, newIMP);
+                              XLog(@"[Hook成功-滑动自动触发] [%@ %@]", clsName, selName);
+                          }
+                      }
+
+                      if (isTranslateClass && [selName isEqualToString:@"setViewModel:forView:"]) {
+                          if (CanHookClassSelector(cls, sel)) {
+                              IMP origIMP = method_getImplementation(m);
+                              IMP newIMP = imp_implementationWithBlock(^void(id self, id viewModel, UIView *view) {
+                                  ((void(*)(id, SEL, id, UIView *))origIMP)(self, sel, viewModel, view);
+                                  AutoInvokeNativeTranslation(self, view, viewModel);
+                              });
+                              method_setImplementation(m, newIMP);
+                              XLog(@"[Hook成功-滑动自动触发] [%@ %@]", clsName, selName);
+                          }
+                      }
+
+                      if (isTranslateClass && [cls isSubclassOfClass:[UIView class]] && [selName isEqualToString:@"layoutSubviews"]) {
+                          if (CanHookClassSelector(cls, sel)) {
+                              IMP origIMP = method_getImplementation(m);
+                              IMP newIMP = imp_implementationWithBlock(^void(UIView *self) {
+                                  ((void(*)(id, SEL))origIMP)(self, sel);
+                                  if (IsAutoTranslateEnabled() && self.window) {
+                                      NSNumber *done = objc_getAssociatedObject(self, kViewTriggeredKey);
+                                      if (!done || ![done boolValue]) {
+                                          objc_setAssociatedObject(self, kViewTriggeredKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                                          dispatch_async(dispatch_get_main_queue(), ^{
+                                              FireNativeTriggerInView(self);
+                                          });
+                                      }
+                                  }
+                              });
+                              method_setImplementation(m, newIMP);
+                              XLog(@"[Hook成功-翻译视图自动触发] [%@ layoutSubviews]", clsName);
+                          }
+                      }
+
+                      if (isStatusOrVMClass && ([selName isEqualToString:@"isTranslatable"] ||
+                                                [selName isEqualToString:@"isTranslationAvailable"] ||
+                                                [selName isEqualToString:@"shouldShowTranslateButton"] ||
+                                                [selName isEqualToString:@"isInlineTranslationAvailable"] ||
+                                                [selName isEqualToString:@"canTranslate"])) {
+                          if ((typeEnc[0] == 'B' || typeEnc[0] == 'c') && CanHookClassSelector(cls, sel)) {
+                              IMP origIMP = method_getImplementation(m);
+                              IMP newIMP = imp_implementationWithBlock(^BOOL(id self) {
+                                  if (IsAutoTranslateEnabled() && ShouldTranslateViewModel(self)) {
+                                      return YES;
+                                  }
+                                  return ((BOOL(*)(id, SEL))origIMP)(self, sel);
+                              });
+                              method_setImplementation(m, newIMP);
+                              XLog(@"[Hook成功-开启原生翻译权限] [%@ %@]", clsName, selName);
+                          }
                       }
                   }
+                  if (methods) free(methods);
               }
               free(classes);
           }
 
-          // ==================== 悬浮球 & 菜单 ====================
           static void ShowSettingsMenu(void);
 
           @interface XFloatBtn : UIButton
@@ -362,7 +464,7 @@ jobs:
               NSString *fullLog = [gLogList componentsJoinedByString:@"\n"];
               [gLogLock unlock];
 
-              UIAlertController *logAlert = [UIAlertController alertControllerWithTitle:@"运行日志"
+              UIAlertController *logAlert = [UIAlertController alertControllerWithTitle:@"运行与符号日志"
                                                                                 message:fullLog.length > 0 ? fullLog : @"(暂无日志)"
                                                                          preferredStyle:UIAlertControllerStyleAlert];
 
@@ -371,7 +473,7 @@ jobs:
               }]];
 
               [logAlert addAction:[UIAlertAction actionWithTitle:@"导出为 TXT 文件" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                  NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"XAutoTranslate.log"];
+                  NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"XAutoTranslate_Native.log"];
                   [fullLog writeToFile:tmpPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
                   NSURL *fileURL = [NSURL fileURLWithPath:tmpPath];
                   UIActivityViewController *actVC = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL] applicationActivities:nil];
@@ -394,31 +496,21 @@ jobs:
                   if (!topVC) return;
 
                   BOOL isEnabled = IsAutoTranslateEnabled();
-                  NSInteger curMode = GetTranslationMode();
 
-                  NSString *title = [NSString stringWithFormat:@"自动翻译设置 (当前: %@)", isEnabled ? @"✅ 开启" : @"❌ 关闭"];
+                  NSString *title = [NSString stringWithFormat:@"X 原生自动翻译 (当前: %@)", isEnabled ? @"✅ 开启" : @"❌ 关闭"];
                   UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
-                                                                                 message:@"原生通道驱动版已就绪"
+                                                                                 message:[NSString stringWithFormat:@"已挂载原生 Hook 点: %lu 个", (unsigned long)gHookedKeys.count]
                                                                           preferredStyle:UIAlertControllerStyleActionSheet];
 
-                  [alert addAction:[UIAlertAction actionWithTitle:(isEnabled ? @"暂停自动翻译" : @"开启自动翻译")
+                  [alert addAction:[UIAlertAction actionWithTitle:(isEnabled ? @"暂停自动触发原生翻译" : @"开启自动触发原生翻译")
                                                              style:UIAlertActionStyleDefault
                                                            handler:^(UIAlertAction *action) {
                       [[NSUserDefaults standardUserDefaults] setBool:!isEnabled forKey:kPrefAutoTranslateEnabled];
                       [[NSUserDefaults standardUserDefaults] synchronize];
-                      NotifyTwitterStatusUpdated(nil, nil);
                   }]];
 
-                  [alert addAction:[UIAlertAction actionWithTitle:(curMode == 0 ? @"切换为：仅显示译文" : @"切换为：原文+译文双语")
-                                                             style:UIAlertActionStyleDefault
-                                                           handler:^(UIAlertAction *action) {
-                      [[NSUserDefaults standardUserDefaults] setInteger:(curMode == 0 ? 1 : 0) forKey:kPrefTranslationMode];
-                      [[NSUserDefaults standardUserDefaults] synchronize];
-                      NotifyTwitterStatusUpdated(nil, nil);
-                  }]];
-
-                  [alert addAction:[UIAlertAction actionWithTitle:@"强制广播刷新界面" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                      NotifyTwitterStatusUpdated(nil, nil);
+                  [alert addAction:[UIAlertAction actionWithTitle:@"重新扫描并挂载原生翻译类" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                      ScanAndHookNativeTranslation();
                   }]];
 
                   [alert addAction:[UIAlertAction actionWithTitle:@"查看与导出运行日志" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
@@ -455,37 +547,24 @@ jobs:
               });
           }
 
-          // ==================== 构造入口 ====================
           __attribute__((constructor)) static void initTweak(void) {
               @autoreleasepool {
                   gLogList = [[NSMutableArray alloc] init];
                   gLogLock = [[NSLock alloc] init];
-                  gTranslationCache = [[NSCache alloc] init];
-                  gTranslationCache.countLimit = 1000;
-                  gPendingRequests = [[NSMutableSet alloc] init];
-                  gStatusObjectMap = [NSMapTable strongToWeakObjectsMapTable];
+                  gHookedKeys = [[NSMutableSet alloc] init];
+                  gTriggeredTweetIDs = [[NSMutableSet alloc] init];
 
-                  gTranslateQueue = [[NSOperationQueue alloc] init];
-                  gTranslateQueue.maxConcurrentOperationCount = 4;
+                  XLog(@"=== XAutoTranslate (X 原生翻译自动触发版) 启动 ===");
 
-                  XLog(@"=== XAutoTranslate (原生管线挂钩版) 启动 ===");
+                  HookGestureRecognizers();
 
                   dispatch_async(dispatch_get_main_queue(), ^{
-                      Class statusCls = objc_getClass("TFNTwitterStatus");
-                      if (statusCls) {
-                          HookMethod(statusCls, @selector(displayText), (IMP)hook_status_displayText, (IMP *)&orig_status_displayText);
-                          HookMethod(statusCls, @selector(hasTranslation), (IMP)hook_status_hasTranslation, (IMP *)&orig_status_hasTranslation);
-                          HookMethod(statusCls, @selector(translation), (IMP)hook_status_translation, (IMP *)&orig_status_translation);
-                      }
-
-                      // 挂钩 ViewModel 类
-                      HookAllTweetViewModels();
+                      ScanAndHookNativeTranslation();
                       SetupFloatingButton();
                   });
 
-                  // 延迟 2 秒二次巡检 ViewModel（防止冷启动子模块延迟加载）
                   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                      HookAllTweetViewModels();
+                      ScanAndHookNativeTranslation();
                   });
               }
           }
