@@ -6,7 +6,7 @@ iOS 原生 X 自动翻译插件。当前修复针对 X 12.33 上“进入帖子�
 
 GitHub Actions 和 Makefile 统一编译根目录 `Tweak.m`，模型辅助代码在 `XATModelSupport.h`。`Tweak.x` 仅保留迁移说明。不要再把源码写入 workflow 的 heredoc。
 
-1. 将修改放到仓库后，在 Actions 中运行 **Build JailFools Dylib (Exact Native Hook)**；main/master 的 push 和对应 PR 也会自动构建。
+1. 将修改放到仓库后，在 Actions 中运行 **Build JailFools Dylib (Timeline Active Trigger)**；main/master 的 push 和对应 PR 也会自动构建。
 2. 下载 `XAutoTranslate-JailFools` artifact，解压得到 `XAutoTranslate.dylib`。
 3. 用原来的注入方式替换旧 dylib，避免同时加载新旧版本；彻底关闭 X 后重新打开。
 
@@ -14,7 +14,8 @@ Actions 使用 macOS 编译 arm64/iOS 15+ 动态库并进行 ad-hoc 签名。本
 
 ## 本次修改
 
-- 原来只有翻译按钮适配器绑定时才触发。现在会寻找实际存在且方法签名匹配的帖子正文适配器，在正文可见后尝试原生翻译入口；另为暴露 `viewModel` 的 `T1StatusView` 提供入口。
+- 保留时间线版本新增的 `T1StandardStatusView`、`T1StatusView`、`T1TweetView` 的模型绑定入口，同时寻找实际存在且方法签名匹配的帖子正文适配器，在正文可见后尝试原生翻译入口。
+- 保留翻译按钮缺少 layout state 时尝试原生 manual layout 的逻辑，增加签名检查。原生状态变化时重新布局可见正文，不以未经验证的状态数字判定成功，也不伪造原生状态通知。
 - 每 0.5 秒检查已经绑定的弱引用视图，包括先预加载、后滚动进屏幕的帖子。等待控制器/账号等条件时每 2 秒再检查，尚未准备好不会永久标记为已处理。
 - 延迟执行前验证视图仍对应同一模型，排除已离屏、已复用、译文、错误和引用正文适配器。
 - 保留可用的原生翻译按钮回调；没有按钮时才尝试签名验证后的原生引擎。一次提交只选一个入口，不因缺少同步事件回调而连续 toggle。

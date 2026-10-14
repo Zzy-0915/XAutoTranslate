@@ -269,6 +269,8 @@ static BOOL CanHook(Class cls, SEL sel) {
         @"initWithViewModel:forFocalView:": @[@"@", @"@", @"Bc"],
         @"shouldBeVisibleForViewModel:": @[@"Bc", @"@"],
         @"setViewModel:forView:": @[@"v", @"@", @"@"],
+        @"setViewModel:": @[@"v", @"@"],
+        @"layoutStateForViewModel:layoutMetrics:": @[@"@", @"@", @"@"],
         @"_t1_updateManualTranslateButtonForViewModel:forView:": @[@"v", @"@", @"@"],
         @"handleStatusViewEvent:controller:": @[@"v", @"@", @"@"],
         @"setState:": @[@"v", @"qQ"],
@@ -344,6 +346,19 @@ static void XATInstallTimelineBindings(void) {
     free(classes);
     XLog(@"[时间线入口扫描] 匹配正文适配器 %lu 个", (unsigned long)matches);
 
+    for (NSString *name in @[@"T1StandardStatusView", @"T1StatusView", @"T1TweetView"]) {
+        Class cls = objc_getClass(name.UTF8String);
+        SEL setter = NSSelectorFromString(@"setViewModel:");
+        if (![cls isSubclassOfClass:[UIView class]] || !CanHook(cls, setter)) continue;
+        Method method = class_getInstanceMethod(cls, setter);
+        IMP original = method_getImplementation(method);
+        method_setImplementation(method, imp_implementationWithBlock(^void(UIView *self, id vm) {
+            ((void(*)(id, SEL, id))original)(self, setter, vm);
+            TriggerNativeTranslateOnAdapter(nil, self, vm);
+        }));
+        XLog(@"[Hook成功] %@ -> setViewModel: (帖子入口)", name);
+    }
+
     Class statusView = objc_getClass("T1StatusView");
     SEL layout = @selector(layoutSubviews);
     NSMethodSignature *sig = [statusView instanceMethodSignatureForSelector:layout];
@@ -400,6 +415,21 @@ static void InstallTargetedNativeHooks(void) {
     // 2. 挂钩 T1StandardStatusTranslateAdapter（仅针对真正的“显示翻译”按钮适配器，绝不碰 ErrorAdapter）
     Class translateAdapterCls = objc_getClass("T1StandardStatusTranslateAdapter");
     if (translateAdapterCls) {
+        SEL layoutSEL = NSSelectorFromString(@"layoutStateForViewModel:layoutMetrics:");
+        SEL manualLayoutSEL = NSSelectorFromString(@"_t1_manualTranslateLayoutStateForViewModel:layoutMetrics:");
+        if (CanHook(translateAdapterCls, layoutSEL)) {
+            Method method = class_getInstanceMethod(translateAdapterCls, layoutSEL);
+            IMP original = method_getImplementation(method);
+            method_setImplementation(method, imp_implementationWithBlock(^id(id self, id vm, id metrics) {
+                id layout = ((id(*)(id, SEL, id, id))original)(self, layoutSEL, vm, metrics);
+                if (!layout && ShouldTranslateViewModel(vm) &&
+                    XATObjectArguments([self methodSignatureForSelector:manualLayoutSEL], 2, '@')) {
+                    layout = ((id(*)(id, SEL, id, id))objc_msgSend)(self, manualLayoutSEL, vm, metrics);
+                }
+                return layout;
+            }));
+            XLog(@"[Hook成功] T1StandardStatusTranslateAdapter -> layoutStateForViewModel:layoutMetrics:");
+        }
         SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
         if (CanHook(translateAdapterCls, visSel)) {
             Method m = class_getInstanceMethod(translateAdapterCls, visSel);
@@ -500,6 +530,15 @@ static void InstallTargetedNativeHooks(void) {
                 method_setImplementation(m, imp_implementationWithBlock(^void(id self, long long state) {
                     XLog(@"[原生翻译状态改变] T1PostTranslationInfo -> state = %lld", state);
                     ((void(*)(id, SEL, long long))orig)(self, stateSel, state);
+                    // Native state numbers are undocumented. Refresh on changes without
+                    // declaring an arbitrary numeric value to mean success.
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        for (UIView *view in gTrackedViews.allObjects) {
+                            if (!XATVisibleInWindow(view)) continue;
+                            [view setNeedsLayout];
+                            [view.superview setNeedsLayout];
+                        }
+                    });
                 }));
             }
         }
@@ -579,7 +618,7 @@ static void ShowLogViewer(UIViewController *rootVC) {
     }]];
 
     [logAlert addAction:[UIAlertAction actionWithTitle:@"导出为 TXT 文件" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"XAutoTranslate_Native.log"];
+        NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"XAutoTranslate_Timeline.log"];
         [fullLog writeToFile:tmpPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
         NSURL *fileURL = [NSURL fileURLWithPath:tmpPath];
         UIActivityViewController *actVC = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL] applicationActivities:nil];

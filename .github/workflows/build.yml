@@ -1,4 +1,4 @@
-name: Build JailFools Dylib (Exact Native Hook)
+name: Build JailFools Dylib (Timeline Active Trigger)
 
 on:
   push:
