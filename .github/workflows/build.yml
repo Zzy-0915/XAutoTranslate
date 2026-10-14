@@ -23,6 +23,7 @@ jobs:
           cat << 'EOF' > Tweak.m
           #import <Foundation/Foundation.h>
           #import <UIKit/UIKit.h>
+          #import <CoreGraphics/CoreGraphics.h>
           #import <objc/runtime.h>
           #import <objc/message.h>
           #import <math.h>
@@ -44,7 +45,6 @@ jobs:
           @property(nonatomic, weak) UIView *translationView;
           - (void)toggleOriginal;
           @end
-
           @implementation XTranslationButton
           - (void)toggleOriginal {
               UIView *view=self.translationView;
@@ -61,7 +61,6 @@ jobs:
           @interface XTopAlignedLabel : UILabel
           @property(nonatomic, weak) UIView *translationView;
           @end
-
           @implementation XTopAlignedLabel
           - (void)drawTextInRect:(CGRect)rect {
               CGRect r = [self textRectForBounds:rect limitedToNumberOfLines:self.numberOfLines];
@@ -92,19 +91,13 @@ jobs:
               NSMutableString *clean = NSMutableString.new;
               for (NSString *w in [raw componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]) {
                   if (!w.length || [w hasPrefix:@"http://"] || [w hasPrefix:@"https://"] || [w hasPrefix:@"@"] || [w hasPrefix:@"#"]) continue;
-                  words++;
-                  [clean appendString:w];
+                  words++; [clean appendString:w];
               }
               for (NSUInteger i=0; i<clean.length; i++) {
                   unichar c = [clean characterAtIndex:i];
-                  if ((c>=0x3040 && c<=0x30FF) || (c>=0x31F0 && c<=0x31FF) || (c>=0xAC00 && c<=0xD7AF)) {
-                      kana++;
-                      foreign++;
-                  } else if (c>=0x4E00 && c<=0x9FFF) {
-                      han++;
-                  } else if ((c>='a' && c<='z') || (c>='A' && c<='Z') || (c>=0x00C0 && c<=0x024F) || (c>=0x0400 && c<=0x06FF)) {
-                      foreign++;
-                  }
+                  if ((c>=0x3040 && c<=0x30FF) || (c>=0x31F0 && c<=0x31FF) || (c>=0xAC00 && c<=0xD7AF)) { kana++; foreign++; }
+                  else if (c>=0x4E00 && c<=0x9FFF) han++;
+                  else if ((c>='a' && c<='z') || (c>='A' && c<='Z') || (c>=0x00C0 && c<=0x024F) || (c>=0x0400 && c<=0x06FF)) foreign++;
               }
               if (kana>=2) return YES;
               NSUInteger total=han+foreign;
@@ -642,7 +635,7 @@ jobs:
           xcrun -sdk iphoneos clang -arch arm64 -dynamiclib \
             -miphoneos-version-min=15.0 \
             -fobjc-arc -fobjc-exceptions \
-            -framework Foundation -framework UIKit \
+            -framework Foundation -framework UIKit -framework CoreGraphics \
             -Wno-deprecated-declarations \
             -Wl,-no_fixup_chains \
             -o output/XAutoTranslate.dylib Tweak.m
