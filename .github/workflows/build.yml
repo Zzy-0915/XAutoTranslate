@@ -19,6 +19,7 @@ jobs:
           cat << 'EOF' > Tweak.m
           #import <Foundation/Foundation.h>
           #import <UIKit/UIKit.h>
+          #import <CoreGraphics/CoreGraphics.h>
           #import <objc/runtime.h>
           #import <objc/message.h>
 
@@ -95,29 +96,31 @@ jobs:
               }
           }
 
-          // 纯数值计算视口范围（无额外依赖，编译 100% 通过）
+          // 纯数值计算视口范围
           static BOOL IsViewInViewport(UIView *view) {
               if (!view || !view.window || view.hidden || view.alpha < 0.01) return NO;
               UIWindow *win = view.window;
               CGRect rect = [view convertRect:view.bounds toView:win];
               if (rect.size.width <= 0 || rect.size.height <= 0) return NO;
               CGFloat screenH = win.bounds.size.height;
-              // 视口上下扩展 200pt 缓冲区域
               return (rect.origin.y + rect.size.height >= -200.0 && rect.origin.y <= screenH + 200.0);
           }
 
-          // ==================== 状态检查：防止二次反弹点击与自愈重试 ====================
-          static BOOL HasAlreadyTranslated(UIView *container, id viewModel) {
+          // ==================== 状态检查：坚决拦截死循环 ====================
+          static BOOL ShouldSkipTranslation(UIView *container, id viewModel) {
+              // 1. 已经由 ViewModel 标记完成
               if (viewModel) {
                   if (SafeCallBool(viewModel, NSSelectorFromString(@"isShowingTranslation"))) return YES;
                   if (SafeCallBool(viewModel, NSSelectorFromString(@"showingTranslation"))) return YES;
                   SEL stateSel = NSSelectorFromString(@"translationState");
                   if ([viewModel respondsToSelector:stateSel]) {
                       long long state = ((long long(*)(id, SEL))objc_msgSend)(viewModel, stateSel);
-                      if (state == 2 || state == 3) return YES;
+                      // 0:未翻译, 1:翻译中, 2:已翻译, 3:翻译失败 -> 只要不是0全部跳过，绝不死循环
+                      if (state != 0) return YES;
                   }
               }
 
+              // 2. 深度扫描所有子视图文字
               NSMutableArray<UIView *> *allViews = [NSMutableArray arrayWithObject:container];
               CollectSubviews(container, allViews);
 
@@ -134,14 +137,17 @@ jobs:
                   }
 
                   if (text && text.length > 0) {
-                      if ([text containsString:@"重试"] || [text containsString:@"Retry"] || [text containsString:@"失败"]) {
-                          return NO;
-                      }
+                      // 核心熔断：出现原文、翻译中、失败、重试等状态，一律坚决跳过，彻底切断死循环！
                       if ([text containsString:@"原文"] ||
                           [text containsString:@"Original"] ||
                           [text containsString:@"翻译自"] ||
                           [text containsString:@"Translated from"] ||
-                          [text containsString:@"已翻译"]) {
+                          [text containsString:@"已翻译"] ||
+                          [text containsString:@"重试"] ||
+                          [text containsString:@"Retry"] ||
+                          [text containsString:@"失败"] ||
+                          [text containsString:@"正在"] ||
+                          [text containsString:@"Translating"]) {
                           return YES;
                       }
                   }
@@ -172,24 +178,25 @@ jobs:
           static void ScheduleLockedAutoClick(UIView *view, id viewModel, BOOL isComment) {
               if (!view || !viewModel) return;
 
-              NSString *tid = ExtractRealTweetID(viewModel);
-
-              // 检查锁定标记
+              // 物理级锁：同个推文/评论实例在内存中仅允许调度一次，绝不死循环重试
               if (objc_getAssociatedObject(viewModel, kViewModelLockedKey)) {
-                  if (!HasAlreadyTranslated(view, viewModel)) {
-                      NSString *text = SafeCallObject(view, NSSelectorFromString(@"text"));
-                      if (text && ([text containsString:@"重试"] || [text containsString:@"Retry"])) {
-                          objc_setAssociatedObject(viewModel, kViewModelLockedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                          @synchronized (gTriggeredTweetIDs) {
-                              if (tid) [gTriggeredTweetIDs removeObject:tid];
-                          }
-                      } else {
+                  return;
+              }
+
+              NSString *tid = ExtractRealTweetID(viewModel);
+              if (tid) {
+                  @synchronized (gTriggeredTweetIDs) {
+                      if ([gTriggeredTweetIDs containsObject:tid]) {
+                          objc_setAssociatedObject(viewModel, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                           return;
                       }
-                  } else {
-                      return;
+                      [gTriggeredTweetIDs addObject:tid];
+                      if (gTriggeredTweetIDs.count > 3000) [gTriggeredTweetIDs removeAllObjects];
                   }
               }
+
+              // 立即上锁
+              objc_setAssociatedObject(viewModel, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
               __weak UIView *weakView = view;
               __weak id weakVM = viewModel;
@@ -198,15 +205,14 @@ jobs:
                   UIView *strongView = weakView;
                   id strongVM = weakVM;
 
-                  // 核心：若推文已滑出当前视口，0ms 瞬间跳过执行下一条，绝不积压等待
+                  // 离开屏幕 0ms 跳过
                   if (!strongView || !strongVM || !IsViewInViewport(strongView)) {
                       ProcessNextQueueAction();
                       return;
                   }
 
-                  // 已展示译文直接跳过并处理下一个
-                  if (HasAlreadyTranslated(strongView, strongVM)) {
-                      objc_setAssociatedObject(strongVM, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                  // 状态熔断：若已在展示译文或处于重试/翻译中状态，立即跳过
+                  if (ShouldSkipTranslation(strongView, strongVM)) {
                       ProcessNextQueueAction();
                       return;
                   }
@@ -254,15 +260,8 @@ jobs:
                   }
 
                   if (triggered) {
-                      objc_setAssociatedObject(strongVM, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                      if (tid) {
-                          @synchronized (gTriggeredTweetIDs) {
-                              [gTriggeredTweetIDs addObject:tid];
-                              if (gTriggeredTweetIDs.count > 3000) [gTriggeredTweetIDs removeAllObjects];
-                          }
-                      }
-                      // 150ms 黄金间隔：屏幕上 4~5 条评论在 0.6 秒内派发完毕，1~2 秒就全部返回译文，且绝不超频触发 429
-                      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                      // 200ms 黄金间隔：彻底杜绝风控限流，整屏 3~4 条推文仅需 0.6 秒即可全部派发
+                      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                           ProcessNextQueueAction();
                       });
                   } else {
@@ -273,14 +272,13 @@ jobs:
               [gQueueLock lock];
               if (!gActionQueue) gActionQueue = [NSMutableArray array];
 
-              // 核心提速：评论区使用 LIFO 视口优先插队（新滑到的评论立即排在最前执行）
+              // 评论插队优先
               if (isComment) {
                   [gActionQueue insertObject:[actionBlock copy] atIndex:0];
               } else {
                   [gActionQueue addObject:[actionBlock copy]];
               }
 
-              // 队列长度限制，自动修剪多余任务
               if (gActionQueue.count > 20) {
                   [gActionQueue removeObjectsInRange:NSMakeRange(20, gActionQueue.count - 20)];
               }
@@ -439,7 +437,7 @@ jobs:
             -miphoneos-version-min=15.0 \
             -fobjc-arc \
             -fobjc-exceptions \
-            -framework Foundation -framework UIKit \
+            -framework Foundation -framework UIKit -framework CoreGraphics \
             -Wno-deprecated-declarations \
             -Wl,-no_fixup_chains \
             -o output/XAutoTranslate.dylib \
