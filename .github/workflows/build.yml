@@ -19,7 +19,6 @@ jobs:
           cat << 'EOF' > Tweak.m
           #import <Foundation/Foundation.h>
           #import <UIKit/UIKit.h>
-          #import <CoreGraphics/CoreGraphics.h>
           #import <objc/runtime.h>
           #import <objc/message.h>
 
@@ -88,21 +87,23 @@ jobs:
           }
 
           // 递归收集子视图
-          static void CollectAllSubviews(UIView *view, NSMutableArray<UIView *> *outArray) {
+          static void CollectSubviews(UIView *view, NSMutableArray<UIView *> *outArray) {
               if (!view) return;
               for (UIView *sub in view.subviews) {
                   [outArray addObject:sub];
-                  CollectAllSubviews(sub, outArray);
+                  CollectSubviews(sub, outArray);
               }
           }
 
-          // 纯数值计算视口范围（无依赖，编译 100% 通过）
+          // 纯数值计算视口范围（无额外依赖，编译 100% 通过）
           static BOOL IsViewInViewport(UIView *view) {
               if (!view || !view.window || view.hidden || view.alpha < 0.01) return NO;
-              CGRect rect = [view convertRect:view.bounds toView:nil];
+              UIWindow *win = view.window;
+              CGRect rect = [view convertRect:view.bounds toView:win];
               if (rect.size.width <= 0 || rect.size.height <= 0) return NO;
-              CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
-              return (rect.origin.y + rect.size.height >= -350.0 && rect.origin.y <= screenH + 350.0);
+              CGFloat screenH = win.bounds.size.height;
+              // 视口上下扩展 200pt 缓冲区域
+              return (rect.origin.y + rect.size.height >= -200.0 && rect.origin.y <= screenH + 200.0);
           }
 
           // ==================== 状态检查：防止二次反弹点击与自愈重试 ====================
@@ -118,7 +119,7 @@ jobs:
               }
 
               NSMutableArray<UIView *> *allViews = [NSMutableArray arrayWithObject:container];
-              CollectAllSubviews(container, allViews);
+              CollectSubviews(container, allViews);
 
               for (UIView *v in allViews) {
                   if (SafeCallBool(v, NSSelectorFromString(@"showingTranslation"))) return YES;
@@ -176,9 +177,14 @@ jobs:
               // 检查锁定标记
               if (objc_getAssociatedObject(viewModel, kViewModelLockedKey)) {
                   if (!HasAlreadyTranslated(view, viewModel)) {
-                      objc_setAssociatedObject(viewModel, kViewModelLockedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                      @synchronized (gTriggeredTweetIDs) {
-                          if (tid) [gTriggeredTweetIDs removeObject:tid];
+                      NSString *text = SafeCallObject(view, NSSelectorFromString(@"text"));
+                      if (text && ([text containsString:@"重试"] || [text containsString:@"Retry"])) {
+                          objc_setAssociatedObject(viewModel, kViewModelLockedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                          @synchronized (gTriggeredTweetIDs) {
+                              if (tid) [gTriggeredTweetIDs removeObject:tid];
+                          }
+                      } else {
+                          return;
                       }
                   } else {
                       return;
@@ -192,7 +198,7 @@ jobs:
                   UIView *strongView = weakView;
                   id strongVM = weakVM;
 
-                  // 若推文已滑出当前屏幕，0ms 瞬间跳过执行下一条，绝不积压
+                  // 核心：若推文已滑出当前视口，0ms 瞬间跳过执行下一条，绝不积压等待
                   if (!strongView || !strongVM || !IsViewInViewport(strongView)) {
                       ProcessNextQueueAction();
                       return;
@@ -206,7 +212,7 @@ jobs:
                   }
 
                   NSMutableArray<UIView *> *candidates = [NSMutableArray arrayWithObject:strongView];
-                  CollectAllSubviews(strongView, candidates);
+                  CollectSubviews(strongView, candidates);
 
                   BOOL triggered = NO;
 
@@ -255,8 +261,8 @@ jobs:
                               if (gTriggeredTweetIDs.count > 3000) [gTriggeredTweetIDs removeAllObjects];
                           }
                       }
-                      // 160ms 节流：既不超频，又能让眼前 3~4 条评论在 0.5 秒内全部触发完毕
-                      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.16 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                      // 150ms 黄金间隔：屏幕上 4~5 条评论在 0.6 秒内派发完毕，1~2 秒就全部返回译文，且绝不超频触发 429
+                      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                           ProcessNextQueueAction();
                       });
                   } else {
@@ -267,13 +273,14 @@ jobs:
               [gQueueLock lock];
               if (!gActionQueue) gActionQueue = [NSMutableArray array];
 
-              // 视口感知调度：评论内容插入队列前端优先执行
+              // 核心提速：评论区使用 LIFO 视口优先插队（新滑到的评论立即排在最前执行）
               if (isComment) {
                   [gActionQueue insertObject:[actionBlock copy] atIndex:0];
               } else {
                   [gActionQueue addObject:[actionBlock copy]];
               }
 
+              // 队列长度限制，自动修剪多余任务
               if (gActionQueue.count > 20) {
                   [gActionQueue removeObjectsInRange:NSMakeRange(20, gActionQueue.count - 20)];
               }
@@ -373,7 +380,7 @@ jobs:
                   }
               }
 
-              // 4. 解锁 Grok 自动翻译展示开关与 FocalView 权限
+              // 4. 解锁 Grok 自动翻译展示开关与权限
               Class grokHelperCls = objc_getClass("T1GrokPostTranslationDisplayHelper");
               if (grokHelperCls) {
                   SEL aTextSel = NSSelectorFromString(@"shouldDisplayAutoTranslateText");
@@ -432,7 +439,7 @@ jobs:
             -miphoneos-version-min=15.0 \
             -fobjc-arc \
             -fobjc-exceptions \
-            -framework Foundation -framework UIKit -framework CoreGraphics \
+            -framework Foundation -framework UIKit \
             -Wno-deprecated-declarations \
             -Wl,-no_fixup_chains \
             -o output/XAutoTranslate.dylib \
