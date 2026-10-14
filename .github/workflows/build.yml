@@ -1,4 +1,4 @@
-name: Build JailFools Dylib (Universal Auto Clicker)
+name: Build JailFools Dylib (Universal Grok Timeline Clicker)
 
 on:
   push:
@@ -26,6 +26,7 @@ jobs:
           static NSMutableArray<NSString *> *gLogList = nil;
           static NSLock *gLogLock = nil;
           static NSMutableSet<NSString *> *gHookedKeys = nil;
+          static NSMutableSet<NSString *> *gTriggeredTweetIDs = nil;
           static const char *kGestureTargetsKey = "kGestureTargetsKey";
           static const char *kAutoClickedFlagKey = "kAutoClickedFlagKey";
 
@@ -72,79 +73,125 @@ jobs:
               return ((id(*)(id, SEL))objc_msgSend)(obj, sel);
           }
 
-          // ==================== 核心：自动触发 T1TranslateButton 点击 ====================
-          static void TriggerTranslateButtonClick(UIView *btn) {
-              if (!IsAutoTranslateEnabled() || !btn || !btn.window) return;
-              if (![NSStringFromClass([btn class]) isEqualToString:@"T1TranslateButton"]) return;
+          static NSString *ExtractTweetID(id vmOrStatus) {
+              if (!vmOrStatus) return nil;
+              NSArray *idSelectors = @[@"statusIDString", @"statusID", @"tweetIDString", @"entryID"];
+              for (NSString *selName in idSelectors) {
+                  SEL sel = NSSelectorFromString(selName);
+                  if ([vmOrStatus respondsToSelector:sel]) {
+                      NSMethodSignature *sig = [vmOrStatus methodSignatureForSelector:sel];
+                      if (sig && sig.numberOfArguments == 2) {
+                          if (sig.methodReturnType[0] == '@') {
+                              id val = ((id(*)(id, SEL))objc_msgSend)(vmOrStatus, sel);
+                              if ([val isKindOfClass:[NSString class]] && [(NSString *)val length] > 0) return val;
+                          } else if (sig.methodReturnType[0] == 'q' || sig.methodReturnType[0] == 'Q') {
+                              long long val = ((long long(*)(id, SEL))objc_msgSend)(vmOrStatus, sel);
+                              if (val > 0) return [NSString stringWithFormat:@"%lld", val];
+                          }
+                      }
+                  }
+              }
+              id innerStatus = SafeCallObject(vmOrStatus, NSSelectorFromString(@"representedStatus")) ?:
+                               SafeCallObject(vmOrStatus, NSSelectorFromString(@"status"));
+              if (innerStatus && innerStatus != vmOrStatus) {
+                  return ExtractTweetID(innerStatus);
+              }
+              return [NSString stringWithFormat:@"%p", vmOrStatus];
+          }
+
+          // ==================== 核心：全自动触发翻译视图点击 ====================
+          static void AutoClickTranslateTarget(UIView *targetView, id viewModel) {
+              if (!IsAutoTranslateEnabled() || !targetView) return;
 
               // 1. 若当前已经在显示译文，绝不点击（防止切回原文）
-              if (SafeCallBool(btn, NSSelectorFromString(@"showingTranslation"))) return;
+              if (SafeCallBool(targetView, NSSelectorFromString(@"showingTranslation"))) return;
 
               // 2. 文字校验：避开“显示原文”或“正在翻译”
-              NSString *title = SafeCallObject(btn, NSSelectorFromString(@"titleText")) ?:
-                                SafeCallObject(btn, NSSelectorFromString(@"_t1_buttonTitle"));
+              NSString *title = SafeCallObject(targetView, NSSelectorFromString(@"titleText")) ?:
+                                SafeCallObject(targetView, NSSelectorFromString(@"_t1_buttonTitle"));
               if (title && ([title containsString:@"原文"] || [title containsString:@"Original"] ||
                             [title containsString:@"正在"] || [title containsString:@"Translating"])) {
                   return;
               }
 
-              // 3. 防重印章：每个按钮实例在单次布局展示中仅触发一次
-              if (objc_getAssociatedObject(btn, kAutoClickedFlagKey)) return;
-              objc_setAssociatedObject(btn, kAutoClickedFlagKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+              // 3. 防重印章
+              NSString *tid = ExtractTweetID(viewModel);
+              if (tid) {
+                  @synchronized (gTriggeredTweetIDs) {
+                      if ([gTriggeredTweetIDs containsObject:tid]) return;
+                      [gTriggeredTweetIDs addObject:tid];
+                  }
+              }
+              if (objc_getAssociatedObject(targetView, kAutoClickedFlagKey)) return;
+              objc_setAssociatedObject(targetView, kAutoClickedFlagKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-              XLog(@"[自动点击捕捉] 捕获到待翻译按钮 T1TranslateButton (标题: %@)", title ?: @"显示翻译");
+              XLog(@"[自动点击启动] 命中推文翻译视图: %@ (ID: %@, 标题: %@)", NSStringFromClass([targetView class]), tid, title ?: @"显示翻译");
 
-              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                  if (SafeCallBool(btn, NSSelectorFromString(@"showingTranslation"))) return;
+              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                  if (SafeCallBool(targetView, NSSelectorFromString(@"showingTranslation"))) return;
 
                   BOOL didTrigger = NO;
 
-                  // 通道 A：优先检查合法的 tapActionBlock（严格验证为 Block 类型）
-                  if ([btn respondsToSelector:NSSelectorFromString(@"tapActionBlock")]) {
-                      @try {
-                          id blockObj = ((id(*)(id, SEL))objc_msgSend)(btn, NSSelectorFromString(@"tapActionBlock"));
-                          if (blockObj && [blockObj isKindOfClass:NSClassFromString(@"NSBlock")]) {
-                              void (^block)(void) = (void(^)(void))blockObj;
-                              XLog(@"[Block触发成功] 执行合法的 tapActionBlock");
-                              block();
-                              didTrigger = YES;
-                              return;
-                          }
-                      } @catch (NSException *e) {}
-                  }
+                  // 收集目标及其所有子视图
+                  NSMutableArray<UIView *> *candidateViews = [NSMutableArray arrayWithObject:targetView];
+                  void (^__block collectSubviews)(UIView *) = ^(UIView *v) {
+                      for (UIView *sub in v.subviews) {
+                          [candidateViews addObject:sub];
+                          collectSubviews(sub);
+                      }
+                  };
+                  collectSubviews(targetView);
 
-                  // 通道 B：直接通过 T1TranslateButton 绑定的 TFNTappableViewHelper 调用 _tapAction
-                  if (!didTrigger) {
+                  // 阶段 A：优先检查是否存在合法的 Block
+                  for (UIView *v in candidateViews) {
+                      if ([v respondsToSelector:NSSelectorFromString(@"tapActionBlock")]) {
+                          @try {
+                              id blockObj = ((id(*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"tapActionBlock"));
+                              if (blockObj && [blockObj isKindOfClass:NSClassFromString(@"NSBlock")]) {
+                                  void (^block)(void) = (void(^)(void))blockObj;
+                                  XLog(@"[点击命中-Block] 成功触发 [%@ tapActionBlock]", NSStringFromClass([v class]));
+                                  block();
+                                  didTrigger = YES;
+                                  break;
+                              }
+                          } @catch (NSException *e) {}
+                      }
+                  }
+                  if (didTrigger) return;
+
+                  // 阶段 B：检查 TFNTappableViewHelper 实例并直调 _tapAction
+                  for (UIView *v in candidateViews) {
                       @try {
                           id helper = nil;
-                          Ivar ivar = class_getInstanceVariable([btn class], "_tappableViewHelper");
-                          if (ivar) helper = object_getIvar(btn, ivar);
-                          if (!helper && [btn respondsToSelector:NSSelectorFromString(@"tappableViewHelper")]) {
-                              helper = SafeCallObject(btn, NSSelectorFromString(@"tappableViewHelper"));
+                          Ivar ivar = class_getInstanceVariable([v class], "_tappableViewHelper");
+                          if (ivar) helper = object_getIvar(v, ivar);
+                          if (!helper && [v respondsToSelector:NSSelectorFromString(@"tappableViewHelper")]) {
+                              helper = SafeCallObject(v, NSSelectorFromString(@"tappableViewHelper"));
                           }
                           if (helper) {
                               SEL tapSel = NSSelectorFromString(@"_tapAction");
                               if ([helper respondsToSelector:tapSel]) {
-                                  XLog(@"[Helper触发成功] 调用 [TFNTappableViewHelper _tapAction]");
+                                  XLog(@"[点击命中-Helper] 成功调用 [%@ _tapAction]", NSStringFromClass([helper class]));
                                   ((void(*)(id, SEL))objc_msgSend)(helper, tapSel);
                                   didTrigger = YES;
-                                  return;
+                                  break;
                               }
                               SEL tapArgSel = NSSelectorFromString(@"_tapAction:");
                               if ([helper respondsToSelector:tapArgSel]) {
-                                  XLog(@"[Helper触发成功] 调用 [TFNTappableViewHelper _tapAction:]");
-                                  ((void(*)(id, SEL, id))objc_msgSend)(helper, tapArgSel, btn.gestureRecognizers.firstObject);
+                                  XLog(@"[点击命中-Helper] 成功调用 [%@ _tapAction:]", NSStringFromClass([helper class]));
+                                  ((void(*)(id, SEL, id))objc_msgSend)(helper, tapArgSel, v.gestureRecognizers.firstObject);
                                   didTrigger = YES;
-                                  return;
+                                  break;
                               }
                           }
                       } @catch (NSException *e) {}
                   }
+                  if (didTrigger) return;
 
-                  // 通道 C：白名单遍历按钮手势（排除 _UISelectionInteraction 等系统手势）
-                  if (!didTrigger) {
+                  // 阶段 C：遍历真实原生手势（严格排除 _UISelectionInteraction 系统选择手势）
+                  for (UIView *v in candidateViews) {
                       @try {
-                          for (UIGestureRecognizer *gr in btn.gestureRecognizers) {
+                          for (UIGestureRecognizer *gr in v.gestureRecognizers) {
                               NSArray *targets = objc_getAssociatedObject(gr, kGestureTargetsKey);
                               for (NSDictionary *pair in targets) {
                                   id target = [pair[@"target"] nonretainedObjectValue];
@@ -152,21 +199,17 @@ jobs:
                                   if (!target || !actionStr) continue;
 
                                   NSString *targetCls = NSStringFromClass([target class]);
-
-                                  // 过滤系统选择手势
                                   if ([targetCls containsString:@"_UI"] ||
                                       [targetCls containsString:@"Selection"] ||
                                       [actionStr containsString:@"select"] ||
-                                      [actionStr containsString:@"Select"] ||
                                       [actionStr containsString:@"hover"] ||
-                                      [actionStr containsString:@"Hover"] ||
                                       [actionStr containsString:@"drag"]) {
                                       continue;
                                   }
 
                                   SEL action = NSSelectorFromString(actionStr);
                                   if ([target respondsToSelector:action]) {
-                                      XLog(@"[精准手势触发] 执行 [%@ %@]", targetCls, actionStr);
+                                      XLog(@"[点击命中-手势] 成功激发 [%@ %@]", targetCls, actionStr);
                                       NSMethodSignature *sig = [target methodSignatureForSelector:action];
                                       if (sig && sig.numberOfArguments == 3) {
                                           ((void(*)(id, SEL, id))objc_msgSend)(target, action, gr);
@@ -180,34 +223,31 @@ jobs:
                           }
                       } @catch (NSException *e) {}
                   }
+                  if (didTrigger) return;
 
-                  // 通道 D：无障碍激活兜底
-                  if (!didTrigger && [btn respondsToSelector:@selector(accessibilityActivate)]) {
-                      @try {
-                          BOOL ok = [btn accessibilityActivate];
-                          XLog(@"[无障碍触发] accessibilityActivate: %d", ok);
-                      } @catch (NSException *e) {}
+                  // 阶段 D：若为 UIControl 触发 TouchUpInside
+                  for (UIView *v in candidateViews) {
+                      if ([v isKindOfClass:[UIControl class]]) {
+                          @try {
+                              XLog(@"[点击命中-Control] 发送 UIControlEventTouchUpInside on %@", NSStringFromClass([v class]));
+                              [(UIControl *)v sendActionsForControlEvents:UIControlEventTouchUpInside];
+                              didTrigger = YES;
+                              return;
+                          } @catch (NSException *e) {}
+                      }
+                  }
+
+                  // 阶段 E：标准无障碍激活兜底
+                  for (UIView *v in candidateViews) {
+                      if ([v respondsToSelector:@selector(accessibilityActivate)]) {
+                          @try {
+                              BOOL ok = [v accessibilityActivate];
+                              XLog(@"[点击命中-无障碍] 执行 accessibilityActivate on %@ (结果: %d)", NSStringFromClass([v class]), ok);
+                              if (ok) return;
+                          } @catch (NSException *e) {}
+                      }
                   }
               });
-          }
-
-          // 从适配器视图容器中定位 T1TranslateButton
-          static UIView *FindTranslateButtonInView(UIView *view) {
-              if (!view) return nil;
-              if ([NSStringFromClass([view class]) isEqualToString:@"T1TranslateButton"]) {
-                  return view;
-              }
-              if ([view respondsToSelector:NSSelectorFromString(@"translateButton")]) {
-                  UIView *btn = SafeCallObject(view, NSSelectorFromString(@"translateButton"));
-                  if (btn && [NSStringFromClass([btn class]) isEqualToString:@"T1TranslateButton"]) {
-                      return btn;
-                  }
-              }
-              for (UIView *sub in view.subviews) {
-                  UIView *found = FindTranslateButtonInView(sub);
-                  if (found) return found;
-              }
-              return nil;
           }
 
           // ==================== Hook 拦截点 ====================
@@ -259,59 +299,8 @@ jobs:
               }
           }
 
-          static void InstallAdapterHooks(void) {
-              // 1. 核心 Hook：T1TranslateButton 布局与挂载屏幕时立即触发
-              Class translateBtnCls = objc_getClass("T1TranslateButton");
-              if (translateBtnCls) {
-                  SEL layoutSel = @selector(layoutSubviews);
-                  if (CanHook(translateBtnCls, layoutSel)) {
-                      Method m = class_getInstanceMethod(translateBtnCls, layoutSel);
-                      if (m) {
-                          IMP orig = method_getImplementation(m);
-                          method_setImplementation(m, imp_implementationWithBlock(^void(UIView *self) {
-                              ((void(*)(id, SEL))orig)(self, layoutSel);
-                              if (self.window) {
-                                  TriggerTranslateButtonClick(self);
-                              }
-                          }));
-                          XLog(@"[Hook成功] T1TranslateButton -> layoutSubviews");
-                      }
-                  }
-
-                  SEL moveSel = @selector(didMoveToWindow);
-                  if (CanHook(translateBtnCls, moveSel)) {
-                      Method m = class_getInstanceMethod(translateBtnCls, moveSel);
-                      if (m) {
-                          IMP orig = method_getImplementation(m);
-                          method_setImplementation(m, imp_implementationWithBlock(^void(UIView *self) {
-                              ((void(*)(id, SEL))orig)(self, moveSel);
-                              if (self.window) {
-                                  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                      TriggerTranslateButtonClick(self);
-                                  });
-                              }
-                          }));
-                          XLog(@"[Hook成功] T1TranslateButton -> didMoveToWindow");
-                      }
-                  }
-
-                  SEL setShowingSel = NSSelectorFromString(@"setShowingTranslation:");
-                  if (CanHook(translateBtnCls, setShowingSel)) {
-                      Method m = class_getInstanceMethod(translateBtnCls, setShowingSel);
-                      if (m) {
-                          IMP orig = method_getImplementation(m);
-                          method_setImplementation(m, imp_implementationWithBlock(^void(UIView *self, BOOL showing) {
-                              ((void(*)(id, SEL, BOOL))orig)(self, setShowingSel, showing);
-                              if (!showing) {
-                                  objc_setAssociatedObject(self, kAutoClickedFlagKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                              }
-                          }));
-                          XLog(@"[Hook成功] T1TranslateButton -> setShowingTranslation:");
-                      }
-                  }
-              }
-
-              // 2. 挂钩时间线 Grok 翻译适配器
+          static void InstallUniversalAdapterHooks(void) {
+              // 1. 核心挂钩：时间线 Grok 翻译适配器（负责外面时间线的翻译渲染）
               Class grokBtnAdapterCls = objc_getClass("T1StandardStatusGrokTranslateButtonViewAdapter");
               if (grokBtnAdapterCls) {
                   SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
@@ -334,9 +323,8 @@ jobs:
                           IMP orig = method_getImplementation(m);
                           method_setImplementation(m, imp_implementationWithBlock(^void(id self, id vm, UIView *view) {
                               ((void(*)(id, SEL, id, UIView *))orig)(self, setVMSel, vm, view);
-                              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                  UIView *btn = FindTranslateButtonInView(view);
-                                  if (btn) TriggerTranslateButtonClick(btn);
+                              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                                  AutoClickTranslateTarget(view, vm);
                               });
                           }));
                           XLog(@"[Hook成功] T1StandardStatusGrokTranslateButtonViewAdapter -> setViewModel:forView:");
@@ -350,9 +338,8 @@ jobs:
                           IMP orig = method_getImplementation(m);
                           method_setImplementation(m, imp_implementationWithBlock(^void(id self, id vm, id info, UIView *view) {
                               ((void(*)(id, SEL, id, id, UIView *))orig)(self, updateSel, vm, info, view);
-                              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                  UIView *btn = FindTranslateButtonInView(view);
-                                  if (btn) TriggerTranslateButtonClick(btn);
+                              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                                  AutoClickTranslateTarget(view, vm);
                               });
                           }));
                           XLog(@"[Hook成功] T1StandardStatusGrokTranslateButtonViewAdapter -> viewModel:didUpdateWithInfo:forView:");
@@ -360,7 +347,7 @@ jobs:
                   }
               }
 
-              // 3. 挂钩标准翻译适配器
+              // 2. 核心挂钩：标准翻译适配器（负责帖子正文详情页）
               Class translateAdapterCls = objc_getClass("T1StandardStatusTranslateAdapter");
               if (translateAdapterCls) {
                   SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
@@ -383,9 +370,8 @@ jobs:
                           IMP orig = method_getImplementation(m);
                           method_setImplementation(m, imp_implementationWithBlock(^void(id self, id vm, UIView *view) {
                               ((void(*)(id, SEL, id, UIView *))orig)(self, setVMSel, vm, view);
-                              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                  UIView *btn = FindTranslateButtonInView(view);
-                                  if (btn) TriggerTranslateButtonClick(btn);
+                              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                                  AutoClickTranslateTarget(view, vm);
                               });
                           }));
                           XLog(@"[Hook成功] T1StandardStatusTranslateAdapter -> setViewModel:forView:");
@@ -399,9 +385,8 @@ jobs:
                           IMP orig = method_getImplementation(m);
                           method_setImplementation(m, imp_implementationWithBlock(^void(id self, id vm, UIView *view) {
                               ((void(*)(id, SEL, id, UIView *))orig)(self, updateBtnSel, vm, view);
-                              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                  UIView *btn = FindTranslateButtonInView(view);
-                                  if (btn) TriggerTranslateButtonClick(btn);
+                              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                                  AutoClickTranslateTarget(view, vm);
                               });
                           }));
                           XLog(@"[Hook成功] T1StandardStatusTranslateAdapter -> _t1_updateManualTranslateButtonForViewModel:forView:");
@@ -409,7 +394,26 @@ jobs:
                   }
               }
 
-              // 4. 解锁推文展示资格
+              // 3. 挂钩 T1TranslateButton 复用重置
+              Class translateBtnCls = objc_getClass("T1TranslateButton");
+              if (translateBtnCls) {
+                  SEL setShowingSel = NSSelectorFromString(@"setShowingTranslation:");
+                  if (CanHook(translateBtnCls, setShowingSel)) {
+                      Method m = class_getInstanceMethod(translateBtnCls, setShowingSel);
+                      if (m) {
+                          IMP orig = method_getImplementation(m);
+                          method_setImplementation(m, imp_implementationWithBlock(^void(UIView *self, BOOL showing) {
+                              ((void(*)(id, SEL, BOOL))orig)(self, setShowingSel, showing);
+                              if (!showing) {
+                                  objc_setAssociatedObject(self, kAutoClickedFlagKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                              }
+                          }));
+                          XLog(@"[Hook成功] T1TranslateButton -> setShowingTranslation:");
+                      }
+                  }
+              }
+
+              // 4. 解锁推文展示资格与译文展开适配器
               Class grokHelperCls = objc_getClass("T1GrokPostTranslationDisplayHelper");
               if (grokHelperCls) {
                   SEL mBtnSel = NSSelectorFromString(@"shouldDisplayManualTranslateButton");
@@ -445,7 +449,6 @@ jobs:
                   }
               }
 
-              // 5. 译文展开适配器
               Class bodyAdapterCls = objc_getClass("T1ConversationTranslatedBodyAdapter");
               if (bodyAdapterCls) {
                   SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
@@ -493,20 +496,6 @@ jobs:
           }
           @end
 
-          static void ScanAndTriggerVisibleTranslateButtons(void) {
-              void (^__block scan)(UIView *) = ^(UIView *v) {
-                  if ([NSStringFromClass([v class]) isEqualToString:@"T1TranslateButton"]) {
-                      TriggerTranslateButtonClick(v);
-                  }
-                  for (UIView *sub in v.subviews) {
-                      scan(sub);
-                  }
-              };
-              for (UIWindow *w in [UIApplication sharedApplication].windows) {
-                  scan(w);
-              }
-          }
-
           static void ShowLogViewer(UIViewController *rootVC) {
               [gLogLock lock];
               NSString *fullLog = [gLogList componentsJoinedByString:@"\n"];
@@ -521,7 +510,7 @@ jobs:
               }]];
 
               [logAlert addAction:[UIAlertAction actionWithTitle:@"导出为 TXT 文件" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                  NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"XAutoTranslate_Universal_2.log"];
+                  NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"XAutoTranslate_GrokUniversal.log"];
                   [fullLog writeToFile:tmpPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
                   NSURL *fileURL = [NSURL fileURLWithPath:tmpPath];
                   UIActivityViewController *actVC = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL] applicationActivities:nil];
@@ -545,9 +534,9 @@ jobs:
 
                   BOOL isEnabled = IsAutoTranslateEnabled();
 
-                  NSString *title = [NSString stringWithFormat:@"原生全自动翻译 (当前: %@)", isEnabled ? @"✅ 开启" : @"❌ 关闭"];
+                  NSString *title = [NSString stringWithFormat:@"全自动翻译 (当前: %@)", isEnabled ? @"✅ 开启" : @"❌ 关闭"];
                   UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
-                                                                                 message:@"时间线外语推文自动秒点翻译"
+                                                                                 message:@"时间线与正文全自动翻译"
                                                                           preferredStyle:UIAlertControllerStyleActionSheet];
 
                   [alert addAction:[UIAlertAction actionWithTitle:(isEnabled ? @"暂停自动点击" : @"开启自动点击")
@@ -557,8 +546,11 @@ jobs:
                       [[NSUserDefaults standardUserDefaults] synchronize];
                   }]];
 
-                  [alert addAction:[UIAlertAction actionWithTitle:@"立即触发当前屏幕上的翻译按钮" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                      ScanAndTriggerVisibleTranslateButtons();
+                  [alert addAction:[UIAlertAction actionWithTitle:@"重置触发记录 (重新自动触发当前页)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                      @synchronized (gTriggeredTweetIDs) {
+                          [gTriggeredTweetIDs removeAllObjects];
+                      }
+                      XLog(@"[提示] 已重置推文触发记录");
                   }]];
 
                   [alert addAction:[UIAlertAction actionWithTitle:@"查看与导出运行日志" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
@@ -595,33 +587,25 @@ jobs:
               });
           }
 
-          // ==================== 构造入口与轻量级定时巡检 ====================
+          // ==================== 构造入口 ====================
           __attribute__((constructor)) static void initTweak(void) {
               @autoreleasepool {
                   gLogList = [[NSMutableArray alloc] init];
                   gLogLock = [[NSLock alloc] init];
                   gHookedKeys = [[NSMutableSet alloc] init];
+                  gTriggeredTweetIDs = [[NSMutableSet alloc] init];
 
-                  XLog(@"=== XAutoTranslate (全场景自动点击完善版) 启动 ===");
+                  XLog(@"=== XAutoTranslate (Grok时间线直通版) 启动 ===");
 
                   HookGestureRecognizers();
 
                   dispatch_async(dispatch_get_main_queue(), ^{
-                      InstallAdapterHooks();
+                      InstallUniversalAdapterHooks();
                       SetupFloatingButton();
                   });
 
                   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                      InstallAdapterHooks();
-                  });
-
-                  // 启动每秒轻量巡检：只针对当前窗口上的 T1TranslateButton 进行点击兜底
-                  dispatch_async(dispatch_get_main_queue(), ^{
-                      [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
-                          if (IsAutoTranslateEnabled()) {
-                              ScanAndTriggerVisibleTranslateButtons();
-                          }
-                      }];
+                      InstallUniversalAdapterHooks();
                   });
               }
           }
