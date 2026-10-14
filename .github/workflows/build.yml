@@ -1,4 +1,4 @@
-name: Build JailFools Dylib (Pure Turbo Auto-Translate)
+name: Build JailFools Dylib (Pure Fast Engine)
 
 on:
   push:
@@ -22,7 +22,7 @@ jobs:
           #import <objc/runtime.h>
           #import <objc/message.h>
 
-          // ==================== 核心状态管理 ====================
+          // ==================== 核心状态与队列管理 ====================
           static NSMutableSet<NSString *> *gHookedKeys = nil;
           static NSMutableSet<NSString *> *gTriggeredTweetIDs = nil;
           static NSMutableArray<void(^)(void)> *gActionQueue = nil;
@@ -86,7 +86,18 @@ jobs:
               return [NSString stringWithFormat:@"ptr_%p", vmOrStatus];
           }
 
-          // ==================== 状态检查：防止二次反弹点击 ====================
+          // ==================== 屏幕视口检测（只服务眼前，过路推文0ms跳过） ====================
+          static BOOL IsViewInViewport(UIView *view) {
+              if (!view || !view.window || view.hidden || view.alpha < 0.01) return NO;
+              CGRect screen = [UIScreen mainScreen].bounds;
+              // 扩展上下 250pt 缓冲区，让刚滑到的推文无感提前就绪
+              CGRect viewportWithBuffer = CGRectInset(screen, 0, -250);
+              CGRect rectInWindow = [view convertRect:view.bounds toView:nil];
+              if (CGRectIsEmpty(rectInWindow)) return NO;
+              return CGRectIntersectsRect(viewportWithBuffer, rectInWindow);
+          }
+
+          // ==================== 状态检查：防止二次反弹点击与自愈重试 ====================
           static BOOL HasAlreadyTranslated(UIView *container, id viewModel) {
               if (viewModel) {
                   if (SafeCallBool(viewModel, NSSelectorFromString(@"isShowingTranslation"))) return YES;
@@ -120,7 +131,10 @@ jobs:
                   }
 
                   if (text && text.length > 0) {
-                      if ([text containsString:@"重试"] || [text containsString:@"Retry"]) return NO;
+                      // 关键自愈：如果当前卡在“重试”或“失败”，返回 NO 允许自动重试点击
+                      if ([text containsString:@"重试"] || [text containsString:@"Retry"] || [text containsString:@"失败"]) {
+                          return NO;
+                      }
                       if ([text containsString:@"原文"] ||
                           [text containsString:@"Original"] ||
                           [text containsString:@"翻译自"] ||
@@ -134,7 +148,7 @@ jobs:
               return NO;
           }
 
-          // ==================== LIFO 视口优先极速队列 ====================
+          // ==================== 视口优先极速队列调度 ====================
           static void ProcessNextQueueAction(void) {
               dispatch_async(dispatch_get_main_queue(), ^{
                   void (^nextAction)(void) = nil;
@@ -158,17 +172,13 @@ jobs:
 
               NSString *tid = ExtractRealTweetID(viewModel);
 
-              // 检查锁定标记，防止反复晃动
+              // 检查锁定标记
               if (objc_getAssociatedObject(viewModel, kViewModelLockedKey)) {
+                  // 如果此前被锁定但当前呈现“重试/失败”，自动解绑重试
                   if (!HasAlreadyTranslated(view, viewModel)) {
-                      NSString *text = SafeCallObject(view, NSSelectorFromString(@"text"));
-                      if (text && ([text containsString:@"重试"] || [text containsString:@"Retry"])) {
-                          objc_setAssociatedObject(viewModel, kViewModelLockedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                          @synchronized (gTriggeredTweetIDs) {
-                              if (tid) [gTriggeredTweetIDs removeObject:tid];
-                          }
-                      } else {
-                          return;
+                      objc_setAssociatedObject(viewModel, kViewModelLockedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                      @synchronized (gTriggeredTweetIDs) {
+                          if (tid) [gTriggeredTweetIDs removeObject:tid];
                       }
                   } else {
                       return;
@@ -181,26 +191,18 @@ jobs:
               void (^actionBlock)(void) = ^{
                   UIView *strongView = weakView;
                   id strongVM = weakVM;
-                  
-                  // 若当前视图已脱离屏幕，0ms 立即跳过并执行下一个
-                  if (!strongView || !strongVM || !strongView.window || strongView.hidden || strongView.alpha < 0.01) {
+
+                  // 核心：若推文已滑出可视区域，0ms 立即跳过执行下一条，绝不排队积压
+                  if (!strongView || !strongVM || !IsViewInViewport(strongView)) {
                       ProcessNextQueueAction();
                       return;
                   }
 
-                  // 已展示译文直接标记完成并处理下一个
+                  // 已有译文直接跳过并处理下一个
                   if (HasAlreadyTranslated(strongView, strongVM)) {
                       objc_setAssociatedObject(strongVM, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                       ProcessNextQueueAction();
                       return;
-                  }
-
-                  objc_setAssociatedObject(strongVM, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                  if (tid) {
-                      @synchronized (gTriggeredTweetIDs) {
-                          [gTriggeredTweetIDs addObject:tid];
-                          if (gTriggeredTweetIDs.count > 3000) [gTriggeredTweetIDs removeAllObjects];
-                      }
                   }
 
                   NSMutableArray<UIView *> *candidates = [NSMutableArray arrayWithObject:strongView];
@@ -251,23 +253,33 @@ jobs:
                       }
                   }
 
-                  // 触发后平滑等待 80ms 继续下一个，极速且不超频
-                  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                  if (triggered) {
+                      objc_setAssociatedObject(strongVM, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                      if (tid) {
+                          @synchronized (gTriggeredTweetIDs) {
+                              [gTriggeredTweetIDs addObject:tid];
+                              if (gTriggeredTweetIDs.count > 3000) [gTriggeredTweetIDs removeAllObjects];
+                          }
+                      }
+                      // 黄金平滑间隔 200ms：完全避开 Twitter 429 速率限制，且 3-4 条仅需 0.6 秒
+                      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                          ProcessNextQueueAction();
+                      });
+                  } else {
                       ProcessNextQueueAction();
-                  });
+                  }
               };
 
               [gQueueLock lock];
               if (!gActionQueue) gActionQueue = [NSMutableArray array];
 
-              // 核心加速：LIFO 视口优先机制（最新滑入屏幕的评论插入队列最前端优先执行）
+              // 核心加速：LIFO 视口优先机制（最新滑到屏幕的推文/评论插入到队列最前面优先执行）
               if (isComment) {
                   [gActionQueue insertObject:[actionBlock copy] atIndex:0];
               } else {
                   [gActionQueue addObject:[actionBlock copy]];
               }
 
-              // 控制队列长度，超出自动修剪尾部积压
               if (gActionQueue.count > 15) {
                   [gActionQueue removeObjectsInRange:NSMakeRange(15, gActionQueue.count - 15)];
               }
@@ -293,7 +305,7 @@ jobs:
           }
 
           static void InstallHooks(void) {
-              // 1. 时间线 Grok 翻译按钮适配器 (主页时间线)
+              // 1. 时间线 Grok 翻译适配器
               Class grokBtnAdapterCls = objc_getClass("T1StandardStatusGrokTranslateButtonViewAdapter");
               if (grokBtnAdapterCls) {
                   SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
@@ -319,7 +331,7 @@ jobs:
                   }
               }
 
-              // 2. 标准翻译适配器 (正文详情及评论区)
+              // 2. 标准翻译适配器 (正文及评论区)
               Class translateAdapterCls = objc_getClass("T1StandardStatusTranslateAdapter");
               if (translateAdapterCls) {
                   SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
@@ -367,35 +379,37 @@ jobs:
                   }
               }
 
-              // 4. 解锁 Grok 自动翻译展示开关
+              // 4. 解锁 Grok 自动翻译展示开关与 FocalView 权限
               Class grokHelperCls = objc_getClass("T1GrokPostTranslationDisplayHelper");
               if (grokHelperCls) {
                   SEL aTextSel = NSSelectorFromString(@"shouldDisplayAutoTranslateText");
                   if (CanHook(grokHelperCls, aTextSel)) {
                       Method m = class_getInstanceMethod(grokHelperCls, aTextSel);
-                      if (m) {
-                          method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) { return YES; }));
-                      }
+                      if (m) method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) { return YES; }));
                   }
                   SEL mTextSel = NSSelectorFromString(@"shouldDisplayManualTranslateText");
                   if (CanHook(grokHelperCls, mTextSel)) {
                       Method m = class_getInstanceMethod(grokHelperCls, mTextSel);
-                      if (m) {
-                          method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) { return YES; }));
-                      }
+                      if (m) method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) { return YES; }));
                   }
                   SEL aBtnSel = NSSelectorFromString(@"shouldDisplayAutoTranslateButton");
                   if (CanHook(grokHelperCls, aBtnSel)) {
                       Method m = class_getInstanceMethod(grokHelperCls, aBtnSel);
-                      if (m) {
-                          method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) { return YES; }));
-                      }
+                      if (m) method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) { return YES; }));
                   }
                   SEL mBtnSel = NSSelectorFromString(@"shouldDisplayManualTranslateButton");
                   if (CanHook(grokHelperCls, mBtnSel)) {
                       Method m = class_getInstanceMethod(grokHelperCls, mBtnSel);
+                      if (m) method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) { return YES; }));
+                  }
+                  SEL init1 = NSSelectorFromString(@"initWithStatusViewModel:account:forFocalView:");
+                  if (CanHook(grokHelperCls, init1)) {
+                      Method m = class_getInstanceMethod(grokHelperCls, init1);
                       if (m) {
-                          method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) { return YES; }));
+                          IMP orig = method_getImplementation(m);
+                          method_setImplementation(m, imp_implementationWithBlock(^id(id self, id vm, id acc, BOOL focal) {
+                              return ((id(*)(id, SEL, id, id, BOOL))orig)(self, init1, vm, acc, YES);
+                          }));
                       }
                   }
               }
