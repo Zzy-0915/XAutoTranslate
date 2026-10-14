@@ -1,4 +1,4 @@
-name: Build JailFools Dylib (Native Button Clean Auto-Translate)
+name: Build JailFools Dylib (Clean Language Status Auto-Translate)
 
 on:
   push:
@@ -54,7 +54,7 @@ jobs:
               return ((id(*)(id, SEL))objc_msgSend)(obj, sel);
           }
 
-          // ==================== 语种代码映射为友好中文 ====================
+          // ==================== 语种代码映射为极简短名称 ====================
           static NSString *FriendlyLanguageName(NSString *code) {
               if (!code || code.length == 0) return @"外语";
               NSString *lower = [code lowercaseString];
@@ -76,7 +76,7 @@ jobs:
               return @"外语";
           }
 
-          // ==================== 语种与有效外文过滤 ====================
+          // ==================== 有效外文过滤 ====================
           static BOOL IsValidForeignText(NSString *rawText) {
               if (!rawText || rawText.length == 0) return NO;
 
@@ -344,11 +344,12 @@ jobs:
               }
           }
 
-          // ==================== 原生按钮完美变身：“翻译自 英语 · 已翻译” ====================
+          // ==================== 完美变身：“语种 已翻译”格式，字号适中，100% 完整显示 ====================
           static void TransformNativeTranslateButton(UIView *translateView, NSString *langName, BOOL isFinished) {
               if (!translateView) return;
 
-              NSString *targetText = isFinished ? [NSString stringWithFormat:@"翻译自 %@ · 已翻译", langName ?: @"外语"] : @"正在翻译...";
+              // 精简为：“英语 已翻译” 或 “韩语 已翻译”，字数少、绝对不截断
+              NSString *targetText = isFinished ? [NSString stringWithFormat:@"%@ 已翻译", langName ?: @"外语"] : @"正在翻译...";
 
               NSMutableArray<UIView *> *allSubs = [NSMutableArray arrayWithObject:translateView];
               CollectSubviews(translateView, allSubs);
@@ -357,10 +358,12 @@ jobs:
                   if ([sub isKindOfClass:[UILabel class]]) {
                       UILabel *lbl = (UILabel *)sub;
                       lbl.text = targetText;
+                      lbl.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightRegular];
                       lbl.textColor = [UIColor secondaryLabelColor];
                   } else if ([sub isKindOfClass:[UIButton class]]) {
                       UIButton *btn = (UIButton *)sub;
                       [btn setTitle:targetText forState:UIControlStateNormal];
+                      btn.titleLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightRegular];
                       [btn setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
                   }
               }
@@ -378,7 +381,7 @@ jobs:
 
               UIColor *bgColor = ResolveBackgroundColor(container);
 
-              // 完美原地变身，显示为：“翻译自 英语 · 已翻译”
+              // 转换为“英语 已翻译”
               TransformNativeTranslateButton(translateView, langName, YES);
 
               XTopAlignedLabel *bodyOverlay = (XTopAlignedLabel *)[bodyView viewWithTag:kFallbackBodyOverlayTag];
@@ -400,7 +403,7 @@ jobs:
               bodyOverlay.text = translatedText;
           }
 
-          // ==================== 唯一翻译引擎：Google GTX 直连免限流引擎 ====================
+          // ==================== 唯一翻译引擎 ====================
           static BOOL IsViewInViewport(UIView *view) {
               if (!view || !view.window || view.hidden || view.alpha < 0.01) return NO;
               if (view.bounds.size.width < 10.0 || view.bounds.size.height < 5.0) return NO;
