@@ -1,4 +1,4 @@
-name: Build JailFools Dylib (Dual-Engine Permanent Auto-Translate)
+name: Build JailFools Dylib (Pure Engine 2 Direct Auto-Translate)
 
 on:
   push:
@@ -24,35 +24,29 @@ jobs:
           #import <objc/runtime.h>
           #import <objc/message.h>
 
-          // ==================== 核心状态与双引擎缓存管理 ====================
+          // ==================== 核心状态与直连引擎缓存 ====================
           static NSMutableSet<NSString *> *gHookedKeys = nil;
-          static NSMutableSet<NSString *> *gTriggeredTweetIDs = nil;
           static NSMutableSet<NSString *> *gFallbackInFlightIDs = nil;
           static NSMutableDictionary<NSString *, NSString *> *gFallbackTranslatedCache = nil;
           static NSHashTable<UIView *> *gTrackedViews = nil;
-          static NSMutableArray<void(^)(void)> *gActionQueue = nil;
           static NSLock *gStateLock = nil;
-          static BOOL gIsQueueRunning = NO;
 
           static const char *kBoundViewModelKey = "kBoundViewModelKey";
-          static const char *kBoundIsCommentKey = "kBoundIsCommentKey";
           static const char *kBoundTweetIDKey = "kBoundTweetIDKey";
-          static const char *kLastViewportYKey = "kLastViewportYKey";
-          static const char *kLastViewportTimeKey = "kLastViewportTimeKey";
-          static const char *kViewModelLockedKey = "kViewModelLockedKey";
-          static const char *kViewModelQueuedKey = "kViewModelQueuedKey";
 
           static const NSInteger kFallbackBtnOverlayTag = 998871;
           static const NSInteger kFallbackBodyOverlayTag = 998872;
 
-          static BOOL SafeCallBool(id obj, SEL sel) {
-              if (!obj || ![obj respondsToSelector:sel]) return NO;
-              NSMethodSignature *sig = [obj methodSignatureForSelector:sel];
-              if (!sig || sig.numberOfArguments != 2) return NO;
-              char ret = sig.methodReturnType[0];
-              if (ret != 'B' && ret != 'c') return NO;
-              return ((BOOL(*)(id, SEL))objc_msgSend)(obj, sel);
+          // 顶部对齐文本标签，确保多行译文贴合原排版
+          @interface XTopAlignedLabel : UILabel
+          @end
+
+          @implementation XTopAlignedLabel
+          - (void)drawTextInRect:(CGRect)rect {
+              CGRect actualRect = [self textRectForBounds:rect limitedToNumberOfLines:self.numberOfLines];
+              [super drawTextInRect:actualRect];
           }
+          @end
 
           static id SafeCallObject(id obj, SEL sel) {
               if (!obj || ![obj respondsToSelector:sel]) return nil;
@@ -61,7 +55,7 @@ jobs:
               return ((id(*)(id, SEL))objc_msgSend)(obj, sel);
           }
 
-          // ==================== 语种与有效外文过滤（过滤中文、纯媒体与超短无意义词） ====================
+          // ==================== 语种与有效外文过滤 ====================
           static BOOL IsValidForeignText(NSString *rawText) {
               if (!rawText || rawText.length == 0) return NO;
 
@@ -292,7 +286,7 @@ jobs:
                   if (r.size.width < 100.0 || r.size.height < 14.0) continue;
 
                   CGFloat dy = r.origin.y - transRect.origin.y;
-                  if (dy < -8.0 || dy > 70.0) continue;
+                  if (dy < -10.0 || dy > 90.0) continue;
 
                   NSString *clsName = NSStringFromClass([sub class]);
                   BOOL isTextClass = ([clsName containsString:@"AttributedTextView"] ||
@@ -303,12 +297,12 @@ jobs:
 
                   NSString *txt = ExtractTextFromView(sub);
                   if (txt && IsValidForeignText(txt)) {
-                      if (dy >= 0 && dy < minDistance) {
+                      if (dy >= -4.0 && dy < minDistance) {
                           minDistance = dy;
                           bestView = sub;
                           bestText = txt;
                       }
-                  } else if (!bestView && dy >= 0 && dy < minDistance) {
+                  } else if (!bestView && dy >= -4.0 && dy < minDistance) {
                       minDistance = dy;
                       bestView = sub;
                   }
@@ -335,17 +329,10 @@ jobs:
               }
           }
 
-          static void ApplyFallbackOverlay(UIView *translateView, NSString *translatedText) {
-              if (!translateView || translatedText.length == 0) return;
-
+          static void ApplyStatusHeaderOverlay(UIView *translateView, NSString *statusTitle) {
+              if (!translateView || translateView.bounds.size.width < 10.0) return;
               UIView *container = FindTweetContainerView(translateView);
-              if (!container) return;
-
-              NSString *dummy = nil;
-              UIView *bodyView = FindBodyTextViewInContainer(container, translateView, &dummy);
-              if (!bodyView) return;
-
-              UIColor *bgColor = ResolveBackgroundColor(container);
+              UIColor *bgColor = ResolveBackgroundColor(container ?: translateView);
 
               UILabel *btnOverlay = (UILabel *)[translateView viewWithTag:kFallbackBtnOverlayTag];
               if (!btnOverlay) {
@@ -359,11 +346,26 @@ jobs:
               }
               btnOverlay.frame = translateView.bounds;
               btnOverlay.backgroundColor = bgColor;
-              btnOverlay.text = @"🌐 已自动翻译";
+              btnOverlay.text = statusTitle;
+          }
 
-              UILabel *bodyOverlay = (UILabel *)[bodyView viewWithTag:kFallbackBodyOverlayTag];
+          static void ApplyFallbackOverlay(UIView *translateView, NSString *translatedText) {
+              if (!translateView || translatedText.length == 0) return;
+
+              UIView *container = FindTweetContainerView(translateView);
+              if (!container) return;
+
+              NSString *dummy = nil;
+              UIView *bodyView = FindBodyTextViewInContainer(container, translateView, &dummy);
+              if (!bodyView || bodyView.bounds.size.width < 50.0) return;
+
+              UIColor *bgColor = ResolveBackgroundColor(container);
+
+              ApplyStatusHeaderOverlay(translateView, @"🌐 已自动翻译");
+
+              XTopAlignedLabel *bodyOverlay = (XTopAlignedLabel *)[bodyView viewWithTag:kFallbackBodyOverlayTag];
               if (!bodyOverlay) {
-                  bodyOverlay = [[UILabel alloc] initWithFrame:bodyView.bounds];
+                  bodyOverlay = [[XTopAlignedLabel alloc] initWithFrame:bodyView.bounds];
                   bodyOverlay.tag = kFallbackBodyOverlayTag;
                   bodyOverlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
                   bodyOverlay.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightRegular];
@@ -371,7 +373,7 @@ jobs:
                   bodyOverlay.numberOfLines = 0;
                   bodyOverlay.lineBreakMode = NSLineBreakByWordWrapping;
                   bodyOverlay.adjustsFontSizeToFitWidth = YES;
-                  bodyOverlay.minimumScaleFactor = 0.72;
+                  bodyOverlay.minimumScaleFactor = 0.70;
                   bodyOverlay.userInteractionEnabled = NO;
                   [bodyView addSubview:bodyOverlay];
               }
@@ -380,7 +382,17 @@ jobs:
               bodyOverlay.text = translatedText;
           }
 
-          // ==================== 第二引擎：内置 Google GTX 免限流直连翻译 ====================
+          // ==================== 唯一翻译引擎：Google GTX 免限流直连引擎 ====================
+          static BOOL IsViewInViewport(UIView *view) {
+              if (!view || !view.window || view.hidden || view.alpha < 0.01) return NO;
+              if (view.bounds.size.width < 10.0 || view.bounds.size.height < 5.0) return NO;
+              UIWindow *win = view.window;
+              CGRect rect = [view convertRect:view.bounds toView:win];
+              if (rect.size.width <= 0 || rect.size.height <= 0) return NO;
+              CGFloat screenH = win.bounds.size.height;
+              return (rect.origin.y + rect.size.height >= -100.0 && rect.origin.y <= screenH + 150.0);
+          }
+
           static void TriggerDirectFallbackTranslation(UIView *translateView, id viewModel, NSString *tid) {
               if (!translateView || !viewModel || !tid) return;
 
@@ -398,23 +410,36 @@ jobs:
               UIView *container = FindTweetContainerView(translateView);
               NSString *bodyText = ExtractModelRawText(viewModel);
               NSString *viewText = nil;
-              FindBodyTextViewInContainer(container, translateView, &viewText);
+              UIView *bodyView = FindBodyTextViewInContainer(container, translateView, &viewText);
               if (viewText.length > bodyText.length) {
                   bodyText = viewText;
               }
 
-              if (!bodyText || !IsValidForeignText(bodyText)) return;
+              // 等待正文视图完成布局后再拉取并渲染
+              if (!bodyView || !bodyText || !IsValidForeignText(bodyText)) return;
+
+              ApplyStatusHeaderOverlay(translateView, @"🌐 正在翻译...");
 
               [gStateLock lock];
               [gFallbackInFlightIDs addObject:tid];
               [gStateLock unlock];
 
               NSString *encoded = [bodyText stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
-              if (!encoded) return;
+              if (!encoded) {
+                  [gStateLock lock];
+                  [gFallbackInFlightIDs removeObject:tid];
+                  [gStateLock unlock];
+                  return;
+              }
 
               NSString *urlStr = [NSString stringWithFormat:@"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=%@", encoded];
               NSURL *url = [NSURL URLWithString:urlStr];
-              if (!url) return;
+              if (!url) {
+                  [gStateLock lock];
+                  [gFallbackInFlightIDs removeObject:tid];
+                  [gStateLock unlock];
+                  return;
+              }
 
               __weak UIView *weakView = translateView;
               __weak id weakVM = viewModel;
@@ -441,7 +466,7 @@ jobs:
                   [gStateLock lock];
                   [gFallbackInFlightIDs removeObject:tid];
                   if (resultText.length > 0) {
-                      if (gFallbackTranslatedCache.count > 2000) [gFallbackTranslatedCache removeAllObjects];
+                      if (gFallbackTranslatedCache.count > 3000) [gFallbackTranslatedCache removeAllObjects];
                       gFallbackTranslatedCache[tid] = [resultText copy];
                   }
                   [gStateLock unlock];
@@ -460,276 +485,24 @@ jobs:
               [task resume];
           }
 
-          // ==================== 状态检查与滚动驻留检测 ====================
-          static BOOL IsScrollViewRapidlyMoving(UIView *view) {
-              UIView *cur = view.superview;
-              while (cur && ![cur isKindOfClass:[UIWindow class]]) {
-                  if ([cur isKindOfClass:[UIScrollView class]]) {
-                      UIScrollView *sv = (UIScrollView *)cur;
-                      if (sv.isDragging || sv.isTracking) return YES;
-                      break;
-                  }
-                  cur = cur.superview;
-              }
-              return NO;
-          }
-
-          static BOOL IsViewReadyAndStationaryInViewport(UIView *view) {
-              if (!view || !view.window || view.hidden || view.alpha < 0.01) return NO;
-              if (view.bounds.size.width < 10.0 || view.bounds.size.height < 5.0) return NO;
-              if (IsScrollViewRapidlyMoving(view)) return NO;
-
-              UIWindow *win = view.window;
-              CGRect rect = [view convertRect:view.bounds toView:win];
-              if (rect.size.width <= 0 || rect.size.height <= 0) return NO;
-              CGFloat screenH = win.bounds.size.height;
-              if (rect.origin.y + rect.size.height < 35.0 || rect.origin.y > screenH - 35.0) return NO;
-
-              double now = CACurrentMediaTime();
-              NSNumber *lastYNum = objc_getAssociatedObject(view, kLastViewportYKey);
-              NSNumber *lastTimeNum = objc_getAssociatedObject(view, kLastViewportTimeKey);
-
-              objc_setAssociatedObject(view, kLastViewportYKey, @(rect.origin.y), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-              objc_setAssociatedObject(view, kLastViewportTimeKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-              if (!lastYNum || !lastTimeNum) return NO;
-
-              double dt = now - [lastTimeNum doubleValue];
-              CGFloat dy = fabs(rect.origin.y - [lastYNum doubleValue]);
-
-              return (dt >= 0.15 && dy < 60.0);
-          }
-
-          static NSInteger CheckTranslationStatus(UIView *container, id viewModel) {
-              if ([container viewWithTag:kFallbackBtnOverlayTag]) return 1;
-
-              NSMutableArray<UIView *> *allViews = [NSMutableArray arrayWithObject:container];
-              CollectSubviews(container, allViews);
-
-              for (UIView *v in allViews) {
-                  if (v.tag == kFallbackBtnOverlayTag || v.tag == kFallbackBodyOverlayTag) return 1;
-                  if (SafeCallBool(v, NSSelectorFromString(@"showingTranslation"))) return 1;
-
-                  NSString *text = ExtractTextFromView(v);
-                  if (text && text.length > 0) {
-                      if ([text containsString:@"失败"] ||
-                          [text containsString:@"重试"] ||
-                          [text containsString:@"Retry"] ||
-                          [text containsString:@"Failed"]) {
-                          return 2;
-                      }
-                      if ([text containsString:@"原文"] ||
-                          [text containsString:@"Original"] ||
-                          [text containsString:@"翻译自"] ||
-                          [text containsString:@"Translated from"] ||
-                          [text containsString:@"已翻译"] ||
-                          [text containsString:@"正在"] ||
-                          [text containsString:@"Translating"]) {
-                          return 1;
-                      }
-                  }
-              }
-
-              if (viewModel) {
-                  if (SafeCallBool(viewModel, NSSelectorFromString(@"isShowingTranslation"))) return 1;
-                  if (SafeCallBool(viewModel, NSSelectorFromString(@"showingTranslation"))) return 1;
-              }
-
-              return 0;
-          }
-
-          // ==================== 队列调度引擎 ====================
-          static void ProcessNextQueueAction(void) {
-              dispatch_async(dispatch_get_main_queue(), ^{
-                  void (^nextAction)(void) = nil;
-                  [gStateLock lock];
-                  if (gActionQueue.count > 0) {
-                      nextAction = gActionQueue.firstObject;
-                      [gActionQueue removeObjectAtIndex:0];
-                  } else {
-                      gIsQueueRunning = NO;
-                  }
-                  [gStateLock unlock];
-
-                  if (nextAction) {
-                      nextAction();
-                  }
-              });
-          }
-
-          static void InspectAndScheduleView(UIView *view) {
-              if (!view || !view.window || view.hidden) return;
+          static void InspectAndTranslateView(UIView *view) {
+              if (!view || !IsViewInViewport(view)) return;
 
               id viewModel = objc_getAssociatedObject(view, kBoundViewModelKey);
               if (!viewModel) return;
 
               NSString *tid = objc_getAssociatedObject(view, kBoundTweetIDKey) ?: ExtractRealTweetID(viewModel);
+              if (!tid) return;
 
-              if (tid) {
-                  [gStateLock lock];
-                  NSString *cachedFallback = gFallbackTranslatedCache[tid];
-                  [gStateLock unlock];
-                  if (cachedFallback.length > 0) {
-                      ApplyFallbackOverlay(view, cachedFallback);
-                      return;
-                  }
-              }
-
-              NSInteger status = CheckTranslationStatus(view, viewModel);
-              if (status == 2) {
-                  TriggerDirectFallbackTranslation(view, viewModel, tid ?: @"fallback");
-                  return;
-              }
-              if (status == 1) {
-                  objc_setAssociatedObject(viewModel, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                  return;
-              }
-
-              if (!IsViewReadyAndStationaryInViewport(view)) return;
-
-              if (objc_getAssociatedObject(viewModel, kViewModelLockedKey)) return;
-              if (objc_getAssociatedObject(viewModel, kViewModelQueuedKey)) return;
-
-              if (tid) {
-                  [gStateLock lock];
-                  BOOL alreadyTriggered = [gTriggeredTweetIDs containsObject:tid];
-                  [gStateLock unlock];
-                  if (alreadyTriggered) {
-                      objc_setAssociatedObject(viewModel, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                      return;
-                  }
-              }
-
-              objc_setAssociatedObject(viewModel, kViewModelQueuedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-              BOOL isComment = [objc_getAssociatedObject(view, kBoundIsCommentKey) boolValue];
-
-              __weak UIView *weakView = view;
-              __weak id weakVM = viewModel;
-
-              void (^actionBlock)(void) = ^{
-                  UIView *strongView = weakView;
-                  id strongVM = weakVM;
-
-                  if (strongVM) {
-                      objc_setAssociatedObject(strongVM, kViewModelQueuedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                  }
-
-                  if (!strongView || !strongVM || !strongView.window || IsScrollViewRapidlyMoving(strongView)) {
-                      ProcessNextQueueAction();
-                      return;
-                  }
-
-                  NSInteger curStatus = CheckTranslationStatus(strongView, strongVM);
-                  if (curStatus == 2) {
-                      TriggerDirectFallbackTranslation(strongView, strongVM, tid ?: @"fallback");
-                      ProcessNextQueueAction();
-                      return;
-                  }
-                  if (curStatus == 1 || objc_getAssociatedObject(strongVM, kViewModelLockedKey)) {
-                      objc_setAssociatedObject(strongVM, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                      ProcessNextQueueAction();
-                      return;
-                  }
-
-                  NSMutableArray<UIView *> *candidates = [NSMutableArray arrayWithObject:strongView];
-                  CollectSubviews(strongView, candidates);
-
-                  BOOL triggered = NO;
-
-                  for (UIView *v in candidates) {
-                      if ([v respondsToSelector:NSSelectorFromString(@"tapActionBlock")]) {
-                          @try {
-                              id blockObj = ((id(*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"tapActionBlock"));
-                              if (blockObj && [blockObj isKindOfClass:NSClassFromString(@"NSBlock")]) {
-                                  void (^block)(void) = (void(^)(void))blockObj;
-                                  block();
-                                  triggered = YES;
-                                  break;
-                              }
-                          } @catch (NSException *e) {}
-                      }
-                  }
-
-                  if (!triggered) {
-                      for (UIView *v in candidates) {
-                          @try {
-                              id helper = nil;
-                              Ivar ivar = class_getInstanceVariable([v class], "_tappableViewHelper");
-                              if (ivar) helper = object_getIvar(v, ivar);
-                              if (!helper && [v respondsToSelector:NSSelectorFromString(@"tappableViewHelper")]) {
-                                  helper = SafeCallObject(v, NSSelectorFromString(@"tappableViewHelper"));
-                              }
-                              if (helper) {
-                                  SEL tapSel = NSSelectorFromString(@"_tapAction");
-                                  if ([helper respondsToSelector:tapSel]) {
-                                      ((void(*)(id, SEL))objc_msgSend)(helper, tapSel);
-                                      triggered = YES;
-                                      break;
-                                  }
-                                  SEL tapArgSel = NSSelectorFromString(@"_tapAction:");
-                                  if ([helper respondsToSelector:tapArgSel]) {
-                                      ((void(*)(id, SEL, id))objc_msgSend)(helper, tapArgSel, v.gestureRecognizers.firstObject);
-                                      triggered = YES;
-                                      break;
-                                  }
-                              }
-                          } @catch (NSException *e) {}
-                      }
-                  }
-
-                  if (triggered) {
-                      objc_setAssociatedObject(strongVM, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                      if (tid) {
-                          [gStateLock lock];
-                          if (gTriggeredTweetIDs.count > 4000) [gTriggeredTweetIDs removeAllObjects];
-                          [gTriggeredTweetIDs addObject:tid];
-                          [gStateLock unlock];
-                      }
-
-                      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                          if (strongView && objc_getAssociatedObject(strongView, kBoundViewModelKey) == strongVM) {
-                              if (CheckTranslationStatus(strongView, strongVM) == 2) {
-                                  TriggerDirectFallbackTranslation(strongView, strongVM, tid ?: @"fallback");
-                              }
-                          }
-                      });
-
-                      NSTimeInterval delay = isComment ? 0.32 : 0.45;
-                      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                          ProcessNextQueueAction();
-                      });
-                  } else {
-                      ProcessNextQueueAction();
-                  }
-              };
-
-              [gStateLock lock];
-              if (!gActionQueue) gActionQueue = [NSMutableArray array];
-              if (isComment) {
-                  [gActionQueue insertObject:[actionBlock copy] atIndex:0];
-              } else {
-                  [gActionQueue addObject:[actionBlock copy]];
-              }
-              if (gActionQueue.count > 15) {
-                  [gActionQueue removeObjectsInRange:NSMakeRange(15, gActionQueue.count - 15)];
-              }
-              if (!gIsQueueRunning) {
-                  gIsQueueRunning = YES;
-                  dispatch_async(dispatch_get_main_queue(), ^{
-                      ProcessNextQueueAction();
-                  });
-              }
-              [gStateLock unlock];
+              TriggerDirectFallbackTranslation(view, viewModel, tid);
           }
 
-          static void TrackTranslateView(UIView *view, id viewModel, BOOL isComment) {
+          static void TrackTranslateView(UIView *view, id viewModel) {
               if (!view || !viewModel) return;
 
               id oldVM = objc_getAssociatedObject(view, kBoundViewModelKey);
               if (oldVM != viewModel) {
                   ClearFallbackOverlays(view);
-                  objc_setAssociatedObject(view, kLastViewportYKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                  objc_setAssociatedObject(view, kLastViewportTimeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
               }
 
               if (!IsForeignTranslatableViewModel(viewModel)) {
@@ -739,7 +512,6 @@ jobs:
 
               NSString *tid = ExtractRealTweetID(viewModel);
               objc_setAssociatedObject(view, kBoundViewModelKey, viewModel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-              objc_setAssociatedObject(view, kBoundIsCommentKey, @(isComment), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
               objc_setAssociatedObject(view, kBoundTweetIDKey, tid, OBJC_ASSOCIATION_COPY_NONATOMIC);
 
               [gStateLock lock];
@@ -747,12 +519,17 @@ jobs:
               NSString *cachedFallback = tid ? gFallbackTranslatedCache[tid] : nil;
               [gStateLock unlock];
 
-              if (cachedFallback.length > 0) {
-                  dispatch_async(dispatch_get_main_queue(), ^{
+              dispatch_async(dispatch_get_main_queue(), ^{
+                  if (cachedFallback.length > 0) {
                       ApplyFallbackOverlay(view, cachedFallback);
-                  });
-                  return;
-              }
+                  } else {
+                      InspectAndTranslateView(view);
+                  }
+              });
+
+              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                  InspectAndTranslateView(view);
+              });
           }
 
           static void ScanTrackedViewsInViewport(void) {
@@ -761,7 +538,7 @@ jobs:
               [gStateLock unlock];
 
               for (UIView *view in allTracked) {
-                  InspectAndScheduleView(view);
+                  InspectAndTranslateView(view);
               }
           }
 
@@ -777,6 +554,7 @@ jobs:
           }
 
           static void InstallHooks(void) {
+              // 1. 时间线翻译栏适配器
               Class grokBtnAdapterCls = objc_getClass("T1StandardStatusGrokTranslateButtonViewAdapter");
               if (grokBtnAdapterCls) {
                   SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
@@ -796,12 +574,13 @@ jobs:
                           IMP orig = method_getImplementation(m);
                           method_setImplementation(m, imp_implementationWithBlock(^void(id self, id vm, UIView *view) {
                               ((void(*)(id, SEL, id, UIView *))orig)(self, setVMSel, vm, view);
-                              TrackTranslateView(view, vm, NO);
+                              TrackTranslateView(view, vm);
                           }));
                       }
                   }
               }
 
+              // 2. 详情页与评论区翻译栏适配器
               Class translateAdapterCls = objc_getClass("T1StandardStatusTranslateAdapter");
               if (translateAdapterCls) {
                   SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
@@ -821,42 +600,7 @@ jobs:
                           IMP orig = method_getImplementation(m);
                           method_setImplementation(m, imp_implementationWithBlock(^void(id self, id vm, UIView *view) {
                               ((void(*)(id, SEL, id, UIView *))orig)(self, setVMSel, vm, view);
-                              TrackTranslateView(view, vm, YES);
-                          }));
-                      }
-                  }
-              }
-
-              Class bodyAdapterCls = objc_getClass("T1ConversationTranslatedBodyAdapter");
-              if (bodyAdapterCls) {
-                  SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
-                  SEL transVMSel = NSSelectorFromString(@"translatedViewModelForViewModel:");
-                  if (CanHook(bodyAdapterCls, visSel)) {
-                      Method m = class_getInstanceMethod(bodyAdapterCls, visSel);
-                      if (m) {
-                          IMP orig = method_getImplementation(m);
-                          method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self, id vm) {
-                              BOOL origVal = ((BOOL(*)(id, SEL, id))orig)(self, visSel, vm);
-                              if (origVal) return YES;
-                              if ([self respondsToSelector:transVMSel]) {
-                                  id transVM = ((id(*)(id, SEL, id))objc_msgSend)(self, transVMSel, vm);
-                                  if (transVM != nil) return YES;
-                              }
-                              return NO;
-                          }));
-                      }
-                  }
-              }
-
-              Class grokHelperCls = objc_getClass("T1GrokPostTranslationDisplayHelper");
-              if (grokHelperCls) {
-                  SEL init1 = NSSelectorFromString(@"initWithStatusViewModel:account:forFocalView:");
-                  if (CanHook(grokHelperCls, init1)) {
-                      Method m = class_getInstanceMethod(grokHelperCls, init1);
-                      if (m) {
-                          IMP orig = method_getImplementation(m);
-                          method_setImplementation(m, imp_implementationWithBlock(^id(id self, id vm, id acc, BOOL focal) {
-                              return ((id(*)(id, SEL, id, id, BOOL))orig)(self, init1, vm, acc, YES);
+                              TrackTranslateView(view, vm);
                           }));
                       }
                   }
@@ -867,16 +611,14 @@ jobs:
           __attribute__((constructor)) static void initTweak(void) {
               @autoreleasepool {
                   gHookedKeys = [[NSMutableSet alloc] init];
-                  gTriggeredTweetIDs = [[NSMutableSet alloc] init];
                   gFallbackInFlightIDs = [[NSMutableSet alloc] init];
                   gFallbackTranslatedCache = [[NSMutableDictionary alloc] init];
                   gTrackedViews = [NSHashTable weakObjectsHashTable];
-                  gActionQueue = [[NSMutableArray alloc] init];
                   gStateLock = [[NSLock alloc] init];
 
                   dispatch_async(dispatch_get_main_queue(), ^{
                       InstallHooks();
-                      [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer * _Nonnull timer) {
+                      [NSTimer scheduledTimerWithTimeInterval:0.20 repeats:YES block:^(NSTimer * _Nonnull timer) {
                           ScanTrackedViewsInViewport();
                       }];
                   });
