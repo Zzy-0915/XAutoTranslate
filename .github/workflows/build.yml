@@ -1,4 +1,4 @@
-name: Build JailFools Dylib (Refined Native Settings & Turbo Comments)
+name: Build JailFools Dylib (Pure Turbo Auto-Translate)
 
 on:
   push:
@@ -22,9 +22,7 @@ jobs:
           #import <objc/runtime.h>
           #import <objc/message.h>
 
-          // ==================== 全局状态与日志管理器 ====================
-          static NSMutableArray<NSString *> *gLogList = nil;
-          static NSLock *gLogLock = nil;
+          // ==================== 核心状态管理 ====================
           static NSMutableSet<NSString *> *gHookedKeys = nil;
           static NSMutableSet<NSString *> *gTriggeredTweetIDs = nil;
           static NSMutableArray<void(^)(void)> *gActionQueue = nil;
@@ -32,37 +30,6 @@ jobs:
           static BOOL gIsQueueRunning = NO;
 
           static const char *kViewModelLockedKey = "kViewModelLockedKey";
-          static NSString *const kPrefAutoTranslateEnabled = @"XAutoTranslate_Enabled";
-
-          static void XLog(NSString *format, ...) {
-              va_list args;
-              va_start(args, format);
-              NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
-              va_end(args);
-
-              NSDateFormatter *df = [[NSDateFormatter alloc] init];
-              [df setDateFormat:@"HH:mm:ss.SSS"];
-              NSString *timestamp = [df stringFromDate:[NSDate date]];
-              NSString *logEntry = [NSString stringWithFormat:@"[%@] %@", timestamp, msg];
-
-              NSLog(@"[XAutoTranslate] %@", logEntry);
-
-              [gLogLock lock];
-              if (!gLogList) gLogList = [NSMutableArray array];
-              [gLogList addObject:logEntry];
-              if (gLogList.count > 1000) [gLogList removeObjectAtIndex:0];
-              [gLogLock unlock];
-          }
-
-          static BOOL IsAutoTranslateEnabled(void) {
-              id val = [[NSUserDefaults standardUserDefaults] objectForKey:kPrefAutoTranslateEnabled];
-              return val ? [val boolValue] : YES;
-          }
-
-          static void SetAutoTranslateEnabled(BOOL enabled) {
-              [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:kPrefAutoTranslateEnabled];
-              [[NSUserDefaults standardUserDefaults] synchronize];
-          }
 
           static BOOL SafeCallBool(id obj, SEL sel) {
               if (!obj || ![obj respondsToSelector:sel]) return NO;
@@ -119,7 +86,7 @@ jobs:
               return [NSString stringWithFormat:@"ptr_%p", vmOrStatus];
           }
 
-          // ==================== 状态检查：防反弹熔断 ====================
+          // ==================== 状态检查：防止二次反弹点击 ====================
           static BOOL HasAlreadyTranslated(UIView *container, id viewModel) {
               if (viewModel) {
                   if (SafeCallBool(viewModel, NSSelectorFromString(@"isShowingTranslation"))) return YES;
@@ -167,8 +134,8 @@ jobs:
               return NO;
           }
 
-          // ==================== 极速平滑任务队列（60ms 极速响应） ====================
-          static void ProcessNextQueueAction(NSTimeInterval nextInterval) {
+          // ==================== LIFO 视口优先极速队列 ====================
+          static void ProcessNextQueueAction(void) {
               dispatch_async(dispatch_get_main_queue(), ^{
                   void (^nextAction)(void) = nil;
                   [gQueueLock lock];
@@ -182,44 +149,16 @@ jobs:
 
                   if (nextAction) {
                       nextAction();
-                      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(nextInterval * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                          ProcessNextQueueAction(nextInterval);
-                      });
                   }
               });
           }
 
-          static void EnqueueTranslateAction(BOOL isDetailOrComment, void(^action)(void)) {
-              if (!action) return;
-              [gQueueLock lock];
-              if (!gActionQueue) gActionQueue = [NSMutableArray array];
-
-              // 视窗优先：评论区只保留最新滑动到的 10 个任务，防止队列过长导致延时
-              if (isDetailOrComment && gActionQueue.count > 10) {
-                  [gActionQueue removeObjectsInRange:NSMakeRange(0, gActionQueue.count - 6)];
-              }
-
-              [gActionQueue addObject:[action copy]];
-
-              // 评论区压缩至 60ms 极速派发，主页时间线保持 150ms
-              NSTimeInterval interval = isDetailOrComment ? 0.06 : 0.15;
-
-              if (!gIsQueueRunning) {
-                  gIsQueueRunning = YES;
-                  dispatch_async(dispatch_get_main_queue(), ^{
-                      ProcessNextQueueAction(interval);
-                  });
-              }
-              [gQueueLock unlock];
-          }
-
-          // 核心执行触发
-          static void ScheduleLockedAutoClick(UIView *view, id viewModel, BOOL isDetailOrComment) {
-              if (!IsAutoTranslateEnabled() || !view || !viewModel) return;
+          static void ScheduleLockedAutoClick(UIView *view, id viewModel, BOOL isComment) {
+              if (!view || !viewModel) return;
 
               NSString *tid = ExtractRealTweetID(viewModel);
 
-              // 检查防重锁定
+              // 检查锁定标记，防止反复晃动
               if (objc_getAssociatedObject(viewModel, kViewModelLockedKey)) {
                   if (!HasAlreadyTranslated(view, viewModel)) {
                       NSString *text = SafeCallObject(view, NSSelectorFromString(@"text"));
@@ -239,15 +178,20 @@ jobs:
               __weak UIView *weakView = view;
               __weak id weakVM = viewModel;
 
-              EnqueueTranslateAction(isDetailOrComment, ^{
+              void (^actionBlock)(void) = ^{
                   UIView *strongView = weakView;
                   id strongVM = weakVM;
-                  if (!strongView || !strongVM) return;
+                  
+                  // 若当前视图已脱离屏幕，0ms 立即跳过并执行下一个
+                  if (!strongView || !strongVM || !strongView.window || strongView.hidden || strongView.alpha < 0.01) {
+                      ProcessNextQueueAction();
+                      return;
+                  }
 
-                  if (!strongView.window || strongView.hidden || strongView.alpha < 0.01) return;
-
+                  // 已展示译文直接标记完成并处理下一个
                   if (HasAlreadyTranslated(strongView, strongVM)) {
                       objc_setAssociatedObject(strongVM, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                      ProcessNextQueueAction();
                       return;
                   }
 
@@ -255,7 +199,7 @@ jobs:
                   if (tid) {
                       @synchronized (gTriggeredTweetIDs) {
                           [gTriggeredTweetIDs addObject:tid];
-                          if (gTriggeredTweetIDs.count > 2500) [gTriggeredTweetIDs removeAllObjects];
+                          if (gTriggeredTweetIDs.count > 3000) [gTriggeredTweetIDs removeAllObjects];
                       }
                   }
 
@@ -270,14 +214,13 @@ jobs:
 
                   BOOL triggered = NO;
 
-                  // 通道 A：调用合法 tapActionBlock
+                  // 通道 A：调用合法安全的 tapActionBlock
                   for (UIView *v in candidates) {
                       if ([v respondsToSelector:NSSelectorFromString(@"tapActionBlock")]) {
                           @try {
                               id blockObj = ((id(*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"tapActionBlock"));
                               if (blockObj && [blockObj isKindOfClass:NSClassFromString(@"NSBlock")]) {
                                   void (^block)(void) = (void(^)(void))blockObj;
-                                  XLog(@"[极速触发-Block] tapActionBlock (%@) (ID: %@)", isDetailOrComment ? @"评论" : @"时间线", tid ?: @"-");
                                   block();
                                   triggered = YES;
                                   break;
@@ -299,7 +242,6 @@ jobs:
                               if (helper) {
                                   SEL tapSel = NSSelectorFromString(@"_tapAction");
                                   if ([helper respondsToSelector:tapSel]) {
-                                      XLog(@"[极速触发-Helper] TFNTappableViewHelper _tapAction (%@) (ID: %@)", isDetailOrComment ? @"评论" : @"时间线", tid ?: @"-");
                                       ((void(*)(id, SEL))objc_msgSend)(helper, tapSel);
                                       triggered = YES;
                                       break;
@@ -308,184 +250,38 @@ jobs:
                           } @catch (NSException *e) {}
                       }
                   }
-              });
-          }
 
-          // ==================== 实时日志查看器 ====================
-          @interface XAutoTranslateLogViewerVC : UIViewController
-          @property (nonatomic, strong) UITextView *textView;
-          @property (nonatomic, strong) NSTimer *refreshTimer;
-          @end
+                  // 触发后平滑等待 80ms 继续下一个，极速且不超频
+                  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                      ProcessNextQueueAction();
+                  });
+              };
 
-          @implementation XAutoTranslateLogViewerVC
-          - (void)viewDidLoad {
-              [super viewDidLoad];
-              self.title = @"实时运行日志";
-              self.view.backgroundColor = [UIColor systemBackgroundColor];
+              [gQueueLock lock];
+              if (!gActionQueue) gActionQueue = [NSMutableArray array];
 
-              self.textView = [[UITextView alloc] initWithFrame:self.view.bounds];
-              self.textView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-              self.textView.editable = NO;
-              self.textView.font = [UIFont monospacedSystemFontOfSize:11.5 weight:UIFontWeightRegular];
-              self.textView.alwaysBounceVertical = YES;
-              [self.view addSubview:self.textView];
-
-              UIBarButtonItem *shareItem = [[UIBarButtonItem alloc] initWithTitle:@"导出" style:UIBarButtonItemStylePlain target:self action:@selector(onExportLog)];
-              UIBarButtonItem *copyItem = [[UIBarButtonItem alloc] initWithTitle:@"复制" style:UIBarButtonItemStylePlain target:self action:@selector(onCopyLog)];
-              self.navigationItem.rightBarButtonItems = @[shareItem, copyItem];
-
-              [self refreshLogContent];
-          }
-
-          - (void)viewWillAppear:(BOOL)animated {
-              [super viewWillAppear:animated];
-              __weak typeof(self) weakSelf = self;
-              self.refreshTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
-                  [weakSelf refreshLogContent];
-              }];
-          }
-
-          - (void)viewWillDisappear:(BOOL)animated {
-              [super viewWillDisappear:animated];
-              [self.refreshTimer invalidate];
-              self.refreshTimer = nil;
-          }
-
-          - (void)refreshLogContent {
-              [gLogLock lock];
-              NSString *fullLog = [gLogList componentsJoinedByString:@"\n"];
-              [gLogLock unlock];
-              if (![self.textView.text isEqualToString:fullLog]) {
-                  self.textView.text = fullLog.length > 0 ? fullLog : @"(暂无日志记录)";
-              }
-          }
-
-          - (void)onCopyLog {
-              [gLogLock lock];
-              NSString *fullLog = [gLogList componentsJoinedByString:@"\n"];
-              [gLogLock unlock];
-              [UIPasteboard generalPasteboard].string = fullLog ?: @"";
-
-              UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"提示" message:@"日志已成功复制到剪贴板" preferredStyle:UIAlertControllerStyleAlert];
-              [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
-              [self presentViewController:alert animated:YES completion:nil];
-          }
-
-          - (void)onExportLog {
-              [gLogLock lock];
-              NSString *fullLog = [gLogList componentsJoinedByString:@"\n"];
-              [gLogLock unlock];
-
-              NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"XAutoTranslate.log"];
-              [fullLog writeToFile:tmpPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-              NSURL *fileURL = [NSURL fileURLWithPath:tmpPath];
-              UIActivityViewController *actVC = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL] applicationActivities:nil];
-              [self presentViewController:actVC animated:YES completion:nil];
-          }
-          @end
-
-          // ==================== 原生「自动翻译」设置面板 ====================
-          @interface XAutoTranslateSettingsVC : UIViewController <UITableViewDelegate, UITableViewDataSource>
-          @property (nonatomic, strong) UITableView *tableView;
-          @end
-
-          @implementation XAutoTranslateSettingsVC
-          - (void)viewDidLoad {
-              [super viewDidLoad];
-              self.title = @"自动翻译";
-              self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
-
-              self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleInsetGrouped];
-              self.tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-              self.tableView.delegate = self;
-              self.tableView.dataSource = self;
-              [self.view addSubview:self.tableView];
-          }
-
-          - (void)onSwitchChanged:(UISwitch *)sender {
-              SetAutoTranslateEnabled(sender.isOn);
-              XLog(@"[设置变更] 全自动翻译开关: %@", sender.isOn ? @"开启" : @"关闭");
-          }
-
-          - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-              return 3;
-          }
-
-          - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-              if (section == 0) return 1;
-              if (section == 1) return 2;
-              return 2;
-          }
-
-          - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-              if (section == 0) return @"核心功能";
-              if (section == 1) return @"系统诊断与日志";
-              return @"关于插件";
-          }
-
-          - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-              if (section == 0) return @"开启后，在主页时间线浏览推文以及点进帖子查看评论时，外语内容将以 2-3 秒极速自动翻译呈现为中文。";
-              if (section == 1) return @"实时日志可监控插件运行细节，如遇异常可一键导出日志文件分享。";
-              return @"完全融入 X 设置中心，已彻底移除桌面悬浮小地球。";
-          }
-
-          - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-              if (indexPath.section == 0) {
-                  UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-                  cell.textLabel.text = @"开启自动翻译";
-                  cell.textLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightRegular];
-                  cell.selectionStyle = UITableViewCellSelectionStyleNone;
-                  UISwitch *sw = [[UISwitch alloc] init];
-                  sw.on = IsAutoTranslateEnabled();
-                  [sw addTarget:self action:@selector(onSwitchChanged:) forControlEvents:UIControlEventValueChanged];
-                  cell.accessoryView = sw;
-                  return cell;
-              } else if (indexPath.section == 1) {
-                  UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
-                  if (indexPath.row == 0) {
-                      cell.textLabel.text = @"实时运行日志";
-                      cell.detailTextLabel.text = @"查看与导出";
-                      cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-                  } else {
-                      cell.textLabel.text = @"清空触发记录缓存";
-                      cell.detailTextLabel.text = [NSString stringWithFormat:@"%lu 条", (unsigned long)gTriggeredTweetIDs.count];
-                      cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-                  }
-                  return cell;
+              // 核心加速：LIFO 视口优先机制（最新滑入屏幕的评论插入队列最前端优先执行）
+              if (isComment) {
+                  [gActionQueue insertObject:[actionBlock copy] atIndex:0];
               } else {
-                  UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
-                  cell.selectionStyle = UITableViewCellSelectionStyleNone;
-                  if (indexPath.row == 0) {
-                      cell.textLabel.text = @"模块版本";
-                      cell.detailTextLabel.text = @"v3.8 (设置中心原生深度嵌入版)";
-                  } else {
-                      cell.textLabel.text = @"架构形态";
-                      cell.detailTextLabel.text = @"极速视口队列 (纯原生界面)";
-                  }
-                  return cell;
+                  [gActionQueue addObject:[actionBlock copy]];
               }
+
+              // 控制队列长度，超出自动修剪尾部积压
+              if (gActionQueue.count > 15) {
+                  [gActionQueue removeObjectsInRange:NSMakeRange(15, gActionQueue.count - 15)];
+              }
+
+              if (!gIsQueueRunning) {
+                  gIsQueueRunning = YES;
+                  dispatch_async(dispatch_get_main_queue(), ^{
+                      ProcessNextQueueAction();
+                  });
+              }
+              [gQueueLock unlock];
           }
 
-          - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-              [tableView deselectRowAtIndexPath:indexPath animated:YES];
-              if (indexPath.section == 1) {
-                  if (indexPath.row == 0) {
-                      XAutoTranslateLogViewerVC *logVC = [[XAutoTranslateLogViewerVC alloc] init];
-                      [self.navigationController pushViewController:logVC animated:YES];
-                  } else {
-                      @synchronized (gTriggeredTweetIDs) {
-                          [gTriggeredTweetIDs removeAllObjects];
-                      }
-                      [self.tableView reloadData];
-                      UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"重置完成" message:@"已清空推文与评论的翻译缓存" preferredStyle:UIAlertControllerStyleAlert];
-                      [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
-                      [self presentViewController:alert animated:YES completion:nil];
-                  }
-              }
-          }
-          @end
-
-          // ==================== Hook 拦截点 ====================
+          // ==================== Hook 节点 ====================
           static BOOL CanHook(Class cls, SEL sel) {
               if (!cls || !sel) return NO;
               NSString *key = [NSString stringWithFormat:@"%@::%@", NSStringFromClass(cls), NSStringFromSelector(sel)];
@@ -497,17 +293,15 @@ jobs:
           }
 
           static void InstallHooks(void) {
-              // 1. 挂钩时间线 Grok 翻译适配器 (外面时间线)
+              // 1. 时间线 Grok 翻译按钮适配器 (主页时间线)
               Class grokBtnAdapterCls = objc_getClass("T1StandardStatusGrokTranslateButtonViewAdapter");
               if (grokBtnAdapterCls) {
                   SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
                   if (CanHook(grokBtnAdapterCls, visSel)) {
                       Method m = class_getInstanceMethod(grokBtnAdapterCls, visSel);
                       if (m) {
-                          IMP orig = method_getImplementation(m);
                           method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self, id vm) {
-                              if (IsAutoTranslateEnabled()) return YES;
-                              return ((BOOL(*)(id, SEL, id))orig)(self, visSel, vm);
+                              return YES;
                           }));
                       }
                   }
@@ -525,17 +319,15 @@ jobs:
                   }
               }
 
-              // 2. 挂钩标准翻译适配器 (正文详情及评论区)
+              // 2. 标准翻译适配器 (正文详情及评论区)
               Class translateAdapterCls = objc_getClass("T1StandardStatusTranslateAdapter");
               if (translateAdapterCls) {
                   SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
                   if (CanHook(translateAdapterCls, visSel)) {
                       Method m = class_getInstanceMethod(translateAdapterCls, visSel);
                       if (m) {
-                          IMP orig = method_getImplementation(m);
                           method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self, id vm) {
-                              if (IsAutoTranslateEnabled()) return YES;
-                              return ((BOOL(*)(id, SEL, id))orig)(self, visSel, vm);
+                              return YES;
                           }));
                       }
                   }
@@ -565,7 +357,7 @@ jobs:
                           method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self, id vm) {
                               BOOL origVal = ((BOOL(*)(id, SEL, id))orig)(self, visSel, vm);
                               if (origVal) return YES;
-                              if (IsAutoTranslateEnabled() && [self respondsToSelector:transVMSel]) {
+                              if ([self respondsToSelector:transVMSel]) {
                                   id transVM = ((id(*)(id, SEL, id))objc_msgSend)(self, transVMSel, vm);
                                   if (transVM != nil) return YES;
                               }
@@ -575,203 +367,54 @@ jobs:
                   }
               }
 
-              // 4. 解锁 Grok 自动翻译展示
+              // 4. 解锁 Grok 自动翻译展示开关
               Class grokHelperCls = objc_getClass("T1GrokPostTranslationDisplayHelper");
               if (grokHelperCls) {
                   SEL aTextSel = NSSelectorFromString(@"shouldDisplayAutoTranslateText");
                   if (CanHook(grokHelperCls, aTextSel)) {
                       Method m = class_getInstanceMethod(grokHelperCls, aTextSel);
                       if (m) {
-                          method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) {
-                              return IsAutoTranslateEnabled() ? YES : NO;
-                          }));
+                          method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) { return YES; }));
                       }
                   }
                   SEL mTextSel = NSSelectorFromString(@"shouldDisplayManualTranslateText");
                   if (CanHook(grokHelperCls, mTextSel)) {
                       Method m = class_getInstanceMethod(grokHelperCls, mTextSel);
                       if (m) {
-                          method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) {
-                              return IsAutoTranslateEnabled() ? YES : NO;
-                          }));
+                          method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) { return YES; }));
                       }
                   }
                   SEL aBtnSel = NSSelectorFromString(@"shouldDisplayAutoTranslateButton");
                   if (CanHook(grokHelperCls, aBtnSel)) {
                       Method m = class_getInstanceMethod(grokHelperCls, aBtnSel);
                       if (m) {
-                          method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) {
-                              return IsAutoTranslateEnabled() ? YES : NO;
-                          }));
+                          method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) { return YES; }));
                       }
                   }
                   SEL mBtnSel = NSSelectorFromString(@"shouldDisplayManualTranslateButton");
                   if (CanHook(grokHelperCls, mBtnSel)) {
                       Method m = class_getInstanceMethod(grokHelperCls, mBtnSel);
                       if (m) {
-                          method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) {
-                              return IsAutoTranslateEnabled() ? YES : NO;
-                          }));
+                          method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) { return YES; }));
                       }
                   }
-              }
-          }
-
-          // ==================== 原生设置列表深度注入（双通道） ====================
-          static void OpenAutoTranslateSettingsFrom(UIViewController *fromVC) {
-              XAutoTranslateSettingsVC *setVC = [[XAutoTranslateSettingsVC alloc] init];
-              [fromVC.navigationController pushViewController:setVC animated:YES];
-          }
-
-          @interface XSettingsBannerControl : UIControl
-          @property (nonatomic, weak) UIViewController *parentVC;
-          @end
-
-          @implementation XSettingsBannerControl
-          - (instancetype)initWithFrame:(CGRect)frame parentVC:(UIViewController *)parentVC {
-              self = [super initWithFrame:frame];
-              if (self) {
-                  self.parentVC = parentVC;
-                  self.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
-                  self.layer.cornerRadius = 12.0;
-                  self.layer.masksToBounds = YES;
-
-                  // 左侧图标容器
-                  UIView *iconBg = [[UIView alloc] initWithFrame:CGRectMake(14, (frame.size.height - 30) / 2.0, 30, 30)];
-                  iconBg.backgroundColor = [UIColor systemBlueColor];
-                  iconBg.layer.cornerRadius = 7.0;
-                  iconBg.layer.masksToBounds = YES;
-                  UILabel *iconLabel = [[UILabel alloc] initWithFrame:iconBg.bounds];
-                  iconLabel.text = @"🌐";
-                  iconLabel.font = [UIFont systemFontOfSize:17];
-                  iconLabel.textAlignment = NSTextAlignmentCenter;
-                  [iconBg addSubview:iconLabel];
-                  [self addSubview:iconBg];
-
-                  // 标题
-                  UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(56, 9, 140, 20)];
-                  titleLabel.text = @"自动翻译";
-                  titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-                  titleLabel.textColor = [UIColor labelColor];
-                  [self addSubview:titleLabel];
-
-                  // 副标题
-                  UILabel *subLabel = [[UILabel alloc] initWithFrame:CGRectMake(56, 30, 220, 15)];
-                  subLabel.text = @"推文与评论全自动翻译设置";
-                  subLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-                  subLabel.textColor = [UIColor secondaryLabelColor];
-                  [self addSubview:subLabel];
-
-                  // 右侧状态与箭头
-                  UILabel *arrow = [[UILabel alloc] initWithFrame:CGRectMake(frame.size.width - 26, (frame.size.height - 20) / 2.0, 16, 20)];
-                  arrow.text = @">";
-                  arrow.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-                  arrow.textColor = [UIColor tertiaryLabelColor];
-                  arrow.textAlignment = NSTextAlignmentCenter;
-                  [self addSubview:arrow];
-
-                  [self addTarget:self action:@selector(onBannerTapped) forControlEvents:UIControlEventTouchUpInside];
-              }
-              return self;
-          }
-
-          - (void)onBannerTapped {
-              if (self.parentVC) {
-                  OpenAutoTranslateSettingsFrom(self.parentVC);
-              }
-          }
-          @end
-
-          static void InjectBannerIntoSettings(UIViewController *vc) {
-              UITableView *tv = SafeCallObject(vc, NSSelectorFromString(@"tableView"));
-              if (!tv && [vc respondsToSelector:@selector(view)]) {
-                  for (UIView *sub in vc.view.subviews) {
-                      if ([sub isKindOfClass:[UITableView class]]) {
-                          tv = (UITableView *)sub;
-                          break;
-                      }
-                  }
-              }
-              if (!tv) return;
-
-              // 检查是否已添加 Banner，防止反复添加
-              if ([tv.tableHeaderView viewWithTag:889988]) return;
-
-              UIView *oldHeader = tv.tableHeaderView;
-              CGFloat oldHeight = oldHeader ? oldHeader.bounds.size.height : 0.0;
-              CGFloat bannerH = 54.0;
-              CGFloat margin = 16.0;
-
-              CGFloat totalW = tv.bounds.size.width > 0 ? tv.bounds.size.width : [UIScreen mainScreen].bounds.size.width;
-              UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, 0, totalW, oldHeight + bannerH + 14.0)];
-              container.tag = 889988;
-
-              if (oldHeader) {
-                  oldHeader.frame = CGRectMake(0, 0, totalW, oldHeight);
-                  [container addSubview:oldHeader];
-              }
-
-              XSettingsBannerControl *banner = [[XSettingsBannerControl alloc] initWithFrame:CGRectMake(margin, oldHeight + 6.0, totalW - margin * 2, bannerH) parentVC:vc];
-              [container addSubview:banner];
-
-              tv.tableHeaderView = container;
-              XLog(@"[设置模块注入] 成功将「自动翻译」卡片嵌入设置首页");
-          }
-
-          static void InstallSettingsHooks(void) {
-              Class settingsVCCls = objc_getClass("T1SettingsViewController");
-              if (settingsVCCls) {
-                  SEL viewDidAppearSel = @selector(viewDidAppear:);
-                  if (CanHook(settingsVCCls, viewDidAppearSel)) {
-                      Method m = class_getInstanceMethod(settingsVCCls, viewDidAppearSel);
-                      if (m) {
-                          IMP orig = method_getImplementation(m);
-                          method_setImplementation(m, imp_implementationWithBlock(^void(UIViewController *self, BOOL animated) {
-                              ((void(*)(id, SEL, BOOL))orig)(self, viewDidAppearSel, animated);
-
-                              // 通道 1：注入导航栏右上角自定义按钮
-                              UIButton *navBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-                              navBtn.frame = CGRectMake(0, 0, 75, 30);
-                              [navBtn setTitle:@"自动翻译" forState:UIControlStateNormal];
-                              navBtn.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-                              [navBtn addTarget:self action:NSSelectorFromString(@"onOpenAutoTranslateSettingsTapped") forControlEvents:UIControlEventTouchUpInside];
-                              self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:navBtn];
-
-                              // 通道 2：注入设置列表首页功能卡片
-                              InjectBannerIntoSettings(self);
-                          }));
-                      }
-                  }
-
-                  SEL tapSel = NSSelectorFromString(@"onOpenAutoTranslateSettingsTapped");
-                  class_addMethod(settingsVCCls, tapSel, imp_implementationWithBlock(^void(UIViewController *self) {
-                      OpenAutoTranslateSettingsFrom(self);
-                  }), "v@:");
-
-                  XLog(@"[Hook成功] T1SettingsViewController (设置中心已嵌入「自动翻译」)");
               }
           }
 
           // ==================== 构造入口 ====================
           __attribute__((constructor)) static void initTweak(void) {
               @autoreleasepool {
-                  gLogList = [[NSMutableArray alloc] init];
-                  gLogLock = [[NSLock alloc] init];
                   gHookedKeys = [[NSMutableSet alloc] init];
                   gTriggeredTweetIDs = [[NSMutableSet alloc] init];
                   gActionQueue = [[NSMutableArray alloc] init];
                   gQueueLock = [[NSLock alloc] init];
 
-                  XLog(@"=== XAutoTranslate (原生设置深度嵌入极速版) 启动 ===");
-
                   dispatch_async(dispatch_get_main_queue(), ^{
                       InstallHooks();
-                      InstallSettingsHooks();
                   });
 
                   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                       InstallHooks();
-                      InstallSettingsHooks();
                   });
               }
           }
