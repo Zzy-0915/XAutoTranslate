@@ -20,6 +20,7 @@ jobs:
           #import <Foundation/Foundation.h>
           #import <UIKit/UIKit.h>
           #import <QuartzCore/QuartzCore.h>
+          #import <CoreGraphics/CoreGraphics.h>
           #import <objc/runtime.h>
           #import <objc/message.h>
 
@@ -98,7 +99,6 @@ jobs:
               if (kanaOrHangulCount >= 2) return YES;
 
               NSUInteger totalLetters = hanziCount + foreignLetterCount;
-              // 过滤单字、纯表情或像 "lol"、"ok" 这样无需消耗配额的极短词
               if (totalLetters < 4 || (validWordCount < 2 && foreignLetterCount < 6)) return NO;
 
               if (hanziCount > 0 && ((double)hanziCount / (double)totalLetters) >= 0.20) {
@@ -160,7 +160,7 @@ jobs:
               return YES;
           }
 
-          // ==================== 唯一 ID 与内容哈希提取（杜绝复用重复请求） ====================
+          // ==================== 唯一 ID 与内容哈希提取 ====================
           static NSString *ExtractRealTweetID(id vmOrStatus) {
               if (!vmOrStatus) return nil;
 
@@ -206,7 +206,7 @@ jobs:
               }
           }
 
-          // ==================== 视图层级与背景色解析（用于第二引擎无缝渲染） ====================
+          // ==================== 视图层级与背景色解析 ====================
           static UIView *FindTweetContainerView(UIView *translateView) {
               UIView *cur = translateView.superview;
               UIView *best = cur;
@@ -229,8 +229,14 @@ jobs:
           static UIColor *ResolveBackgroundColor(UIView *view) {
               UIView *cur = view;
               while (cur && ![cur isKindOfClass:[UIWindow class]]) {
-                  if (cur.backgroundColor && CGColorGetAlpha(cur.backgroundColor.CGColor) > 0.9) {
-                      return cur.backgroundColor;
+                  if (cur.backgroundColor) {
+                      CGFloat alpha = 0.0;
+                      if ([cur.backgroundColor getRed:NULL green:NULL blue:NULL alpha:&alpha] ||
+                          [cur.backgroundColor getWhite:NULL alpha:&alpha]) {
+                          if (alpha > 0.9) {
+                              return cur.backgroundColor;
+                          }
+                      }
                   }
                   cur = cur.superview;
               }
@@ -285,7 +291,6 @@ jobs:
                   CGRect r = [sub convertRect:sub.bounds toView:container];
                   if (r.size.width < 100.0 || r.size.height < 14.0) continue;
 
-                  // 正文视图位于翻译按钮下方附近
                   CGFloat dy = r.origin.y - transRect.origin.y;
                   if (dy < -8.0 || dy > 70.0) continue;
 
@@ -342,7 +347,6 @@ jobs:
 
               UIColor *bgColor = ResolveBackgroundColor(container);
 
-              // 1. 覆盖顶部的“翻译失败 重试”提示为“🌐 已自动翻译”
               UILabel *btnOverlay = (UILabel *)[translateView viewWithTag:kFallbackBtnOverlayTag];
               if (!btnOverlay) {
                   btnOverlay = [[UILabel alloc] initWithFrame:translateView.bounds];
@@ -357,7 +361,6 @@ jobs:
               btnOverlay.backgroundColor = bgColor;
               btnOverlay.text = @"🌐 已自动翻译";
 
-              // 2. 覆盖正文区域展示中文译文
               UILabel *bodyOverlay = (UILabel *)[bodyView viewWithTag:kFallbackBodyOverlayTag];
               if (!bodyOverlay) {
                   bodyOverlay = [[UILabel alloc] initWithFrame:bodyView.bounds];
@@ -494,11 +497,9 @@ jobs:
               double dt = now - [lastTimeNum doubleValue];
               CGFloat dy = fabs(rect.origin.y - [lastYNum doubleValue]);
 
-              // 要求在视口内平稳停留（两次扫描间位移小于 60pt），过滤飞速滑过的推文
               return (dt >= 0.15 && dy < 60.0);
           }
 
-          // 返回值：0 = 未翻译可触发, 1 = 已翻译或正在翻译中, 2 = 检测到官方“翻译失败/重试”需启动第二引擎
           static NSInteger CheckTranslationStatus(UIView *container, id viewModel) {
               if ([container viewWithTag:kFallbackBtnOverlayTag]) return 1;
 
@@ -564,7 +565,6 @@ jobs:
 
               NSString *tid = objc_getAssociatedObject(view, kBoundTweetIDKey) ?: ExtractRealTweetID(viewModel);
 
-              // 若缓存中已有直连译文，直接0ms渲染
               if (tid) {
                   [gStateLock lock];
                   NSString *cachedFallback = gFallbackTranslatedCache[tid];
@@ -576,7 +576,6 @@ jobs:
               }
 
               NSInteger status = CheckTranslationStatus(view, viewModel);
-              // 若发现官方接口报错“翻译失败 重试”，立即启动内置直连第二引擎接管！
               if (status == 2) {
                   TriggerDirectFallbackTranslation(view, viewModel, tid ?: @"fallback");
                   return;
@@ -586,7 +585,6 @@ jobs:
                   return;
               }
 
-              // 要求在屏幕视口内平稳驻留才触发官方接口，杜绝滑屏浪费配额
               if (!IsViewReadyAndStationaryInViewport(view)) return;
 
               if (objc_getAssociatedObject(viewModel, kViewModelLockedKey)) return;
@@ -688,7 +686,6 @@ jobs:
                           [gStateLock unlock];
                       }
 
-                      // 触发官方翻译 1.5 秒后复查一次，若官方返回“翻译失败”，立即用直连第二引擎兜底
                       dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                           if (strongView && objc_getAssociatedObject(strongView, kBoundViewModelKey) == strongVM) {
                               if (CheckTranslationStatus(strongView, strongVM) == 2) {
@@ -697,7 +694,6 @@ jobs:
                           }
                       });
 
-                      // 平稳节流间隔：保护官方配额
                       NSTimeInterval delay = isComment ? 0.32 : 0.45;
                       dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                           ProcessNextQueueAction();
@@ -781,7 +777,6 @@ jobs:
           }
 
           static void InstallHooks(void) {
-              // 1. 时间线 Grok 翻译适配器
               Class grokBtnAdapterCls = objc_getClass("T1StandardStatusGrokTranslateButtonViewAdapter");
               if (grokBtnAdapterCls) {
                   SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
@@ -807,7 +802,6 @@ jobs:
                   }
               }
 
-              // 2. 标准翻译适配器 (正文及评论区)
               Class translateAdapterCls = objc_getClass("T1StandardStatusTranslateAdapter");
               if (translateAdapterCls) {
                   SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
@@ -833,7 +827,6 @@ jobs:
                   }
               }
 
-              // 3. 译文展开适配器
               Class bodyAdapterCls = objc_getClass("T1ConversationTranslatedBodyAdapter");
               if (bodyAdapterCls) {
                   SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
@@ -855,7 +848,6 @@ jobs:
                   }
               }
 
-              // 4. 解锁 FocalView 权限
               Class grokHelperCls = objc_getClass("T1GrokPostTranslationDisplayHelper");
               if (grokHelperCls) {
                   SEL init1 = NSSelectorFromString(@"initWithStatusViewModel:account:forFocalView:");
@@ -900,7 +892,7 @@ jobs:
             -miphoneos-version-min=15.0 \
             -fobjc-arc \
             -fobjc-exceptions \
-            -framework Foundation -framework UIKit -framework QuartzCore \
+            -framework Foundation -framework UIKit -framework QuartzCore -framework CoreGraphics \
             -Wno-deprecated-declarations \
             -Wl,-no_fixup_chains \
             -o output/XAutoTranslate.dylib \
