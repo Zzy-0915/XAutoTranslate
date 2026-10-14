@@ -1,4 +1,4 @@
-name: Build JailFools Dylib (Anti-429 Smart Filter Engine)
+name: Build JailFools Dylib (Viewport Tracker Auto-Translate)
 
 on:
   push:
@@ -19,18 +19,24 @@ jobs:
           cat << 'EOF' > Tweak.m
           #import <Foundation/Foundation.h>
           #import <UIKit/UIKit.h>
+          #import <QuartzCore/QuartzCore.h>
           #import <objc/runtime.h>
           #import <objc/message.h>
 
           // ==================== 核心状态管理 ====================
           static NSMutableSet<NSString *> *gHookedKeys = nil;
-          static NSMutableSet<NSString *> *gTriggeredTweetIDs = nil;
+          static NSMutableDictionary<NSString *, NSNumber *> *gTweetAttemptCount = nil;
+          static NSMutableDictionary<NSString *, NSNumber *> *gTweetLastAttemptTime = nil;
+          static NSHashTable<UIView *> *gTrackedViews = nil;
           static NSMutableArray<void(^)(void)> *gActionQueue = nil;
-          static NSLock *gQueueLock = nil;
+          static NSLock *gStateLock = nil;
           static BOOL gIsQueueRunning = NO;
 
-          static const char *kViewModelLockedKey = "kViewModelLockedKey";
+          static const char *kBoundViewModelKey = "kBoundViewModelKey";
+          static const char *kBoundIsCommentKey = "kBoundIsCommentKey";
           static const char *kViewModelQueuedKey = "kViewModelQueuedKey";
+          static const char *kViewModelAttemptKey = "kViewModelAttemptKey";
+          static const char *kViewModelLastTimeKey = "kViewModelLastTimeKey";
 
           static BOOL SafeCallBool(id obj, SEL sel) {
               if (!obj || ![obj respondsToSelector:sel]) return NO;
@@ -48,7 +54,7 @@ jobs:
               return ((id(*)(id, SEL))objc_msgSend)(obj, sel);
           }
 
-          // ==================== 语种与有效外文智能过滤（杜绝中文/无字视频报错） ====================
+          // ==================== 语种与有效外文智能过滤 ====================
           static BOOL IsValidForeignText(NSString *rawText) {
               if (!rawText || rawText.length == 0) return NO;
 
@@ -56,7 +62,6 @@ jobs:
               NSUInteger kanaOrHangulCount = 0;
               NSUInteger foreignLetterCount = 0;
 
-              // 简易剔除 URL 与 @提及 的干扰
               NSArray<NSString *> *words = [rawText componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
               NSMutableString *cleanText = [NSMutableString string];
               for (NSString *w in words) {
@@ -71,29 +76,21 @@ jobs:
 
               for (NSUInteger i = 0; i < len; i++) {
                   unichar c = [cleanText characterAtIndex:i];
-                  // 日文平假名/片假名 或 韩文谚文 -> 属于外语
                   if ((c >= 0x3040 && c <= 0x30FF) || (c >= 0x31F0 && c <= 0x31FF) || (c >= 0xAC00 && c <= 0xD7AF)) {
                       kanaOrHangulCount++;
                       foreignLetterCount++;
-                  }
-                  // CJK 汉字
-                  else if (c >= 0x4E00 && c <= 0x9FFF) {
+                  } else if (c >= 0x4E00 && c <= 0x9FFF) {
                       hanziCount++;
-                  }
-                  // 拉丁字母、西里尔字母、阿拉伯字母等外语字符
-                  else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= 0x00C0 && c <= 0x024F) || (c >= 0x0400 && c <= 0x06FF)) {
+                  } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= 0x00C0 && c <= 0x024F) || (c >= 0x0400 && c <= 0x06FF)) {
                       foreignLetterCount++;
                   }
               }
 
-              // 若包含日文假名或韩文，判定为有效外语
               if (kanaOrHangulCount >= 2) return YES;
 
               NSUInteger totalLetters = hanziCount + foreignLetterCount;
-              // 没有任何有效文字（纯视频、纯图片、纯数字或纯表情），严禁触发翻译
               if (totalLetters < 2) return NO;
 
-              // 若汉字占总字母数的 20% 以上（且无日韩假名），判定为中文推文，严禁触发翻译
               if (hanziCount > 0 && ((double)hanziCount / (double)totalLetters) >= 0.20) {
                   return NO;
               }
@@ -104,7 +101,6 @@ jobs:
           static BOOL IsForeignTranslatableViewModel(id vmOrStatus) {
               if (!vmOrStatus) return NO;
 
-              // 1. 检查推特原生语种代码 (zh:中文, und:未定义, zxx/qme/qam/qht:纯媒体/无文本)
               NSArray *langSelectors = @[@"originalLanguage", @"language", @"lang"];
               for (NSString *selName in langSelectors) {
                   id langVal = SafeCallObject(vmOrStatus, NSSelectorFromString(selName));
@@ -123,7 +119,6 @@ jobs:
                   }
               }
 
-              // 2. 提取推文正文进行字符级校验
               NSArray *textSelectors = @[@"displayText", @"text", @"fullText", @"renderedText"];
               for (NSString *selName in textSelectors) {
                   id txtVal = SafeCallObject(vmOrStatus, NSSelectorFromString(selName));
@@ -132,7 +127,6 @@ jobs:
                   }
               }
 
-              // 3. 向下递归关联模型
               NSArray *subKeys = @[@"statusViewModel", @"representedStatus", @"status", @"tweet", @"conversationNode"];
               for (NSString *subKey in subKeys) {
                   id subObj = SafeCallObject(vmOrStatus, NSSelectorFromString(subKey));
@@ -191,14 +185,14 @@ jobs:
               }
           }
 
-          // 检测视图是否处于当前屏幕可视区域
+          // 检测视图是否真正挂载在当前屏幕可视范围内
           static BOOL IsViewInViewport(UIView *view) {
               if (!view || !view.window || view.hidden || view.alpha < 0.01) return NO;
               UIWindow *win = view.window;
               CGRect rect = [view convertRect:view.bounds toView:win];
               if (rect.size.width <= 0 || rect.size.height <= 0) return NO;
               CGFloat screenH = win.bounds.size.height;
-              return (rect.origin.y + rect.size.height >= -120.0 && rect.origin.y <= screenH + 120.0);
+              return (rect.origin.y + rect.size.height >= 0.0 && rect.origin.y <= screenH + 80.0);
           }
 
           // ==================== 状态检查：防止反弹与死循环 ====================
@@ -247,18 +241,18 @@ jobs:
               return NO;
           }
 
-          // ==================== 视口优先与防 429 限流调度队列 ====================
+          // ==================== 视口追踪与队列调度引擎 ====================
           static void ProcessNextQueueAction(void) {
               dispatch_async(dispatch_get_main_queue(), ^{
                   void (^nextAction)(void) = nil;
-                  [gQueueLock lock];
+                  [gStateLock lock];
                   if (gActionQueue.count > 0) {
                       nextAction = gActionQueue.firstObject;
                       [gActionQueue removeObjectAtIndex:0];
                   } else {
                       gIsQueueRunning = NO;
                   }
-                  [gQueueLock unlock];
+                  [gStateLock unlock];
 
                   if (nextAction) {
                       nextAction();
@@ -266,28 +260,40 @@ jobs:
               });
           }
 
-          static void ScheduleLockedAutoClick(UIView *view, id viewModel, BOOL isComment) {
-              if (!view || !viewModel) return;
+          static void TryScheduleVisibleView(UIView *view) {
+              if (!view || !IsViewInViewport(view)) return;
 
-              // 核心拦截：中文推文或无文本视频/图片推文，直接跳过不翻译
-              if (!IsForeignTranslatableViewModel(viewModel)) {
+              id viewModel = objc_getAssociatedObject(view, kBoundViewModelKey);
+              if (!viewModel) return;
+
+              if (objc_getAssociatedObject(viewModel, kViewModelQueuedKey)) return;
+
+              if (ShouldSkipTranslation(view, viewModel)) {
+                  objc_setAssociatedObject(viewModel, kViewModelAttemptKey, @(2), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                   return;
               }
 
-              if (objc_getAssociatedObject(viewModel, kViewModelLockedKey)) return;
-              if (objc_getAssociatedObject(viewModel, kViewModelQueuedKey)) return;
-
               NSString *tid = ExtractRealTweetID(viewModel);
+              double now = CACurrentMediaTime();
+
+              NSInteger attempts = [objc_getAssociatedObject(viewModel, kViewModelAttemptKey) integerValue];
+              double lastTime = [objc_getAssociatedObject(viewModel, kViewModelLastTimeKey) doubleValue];
+
+              [gStateLock lock];
               if (tid) {
-                  @synchronized (gTriggeredTweetIDs) {
-                      if ([gTriggeredTweetIDs containsObject:tid]) {
-                          objc_setAssociatedObject(viewModel, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                          return;
-                      }
-                  }
+                  NSInteger mapAttempts = [gTweetAttemptCount[tid] integerValue];
+                  double mapLastTime = [gTweetLastAttemptTime[tid] doubleValue];
+                  if (mapAttempts > attempts) attempts = mapAttempts;
+                  if (mapLastTime > lastTime) lastTime = mapLastTime;
               }
+              [gStateLock unlock];
+
+              // 最多允许 2 次尝试（首次触发 + 若首帧未挂载成功导致仍停留在“显示翻译”则在 1.2s 后补点一次）
+              if (attempts >= 2) return;
+              if (attempts == 1 && (now - lastTime) < 1.2) return;
 
               objc_setAssociatedObject(viewModel, kViewModelQueuedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+              BOOL isComment = [objc_getAssociatedObject(view, kBoundIsCommentKey) boolValue];
 
               __weak UIView *weakView = view;
               __weak id weakVM = viewModel;
@@ -300,14 +306,14 @@ jobs:
                       objc_setAssociatedObject(strongVM, kViewModelQueuedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                   }
 
-                  // 若用户已快速滑过该推文（不在屏幕视口内），0ms 跳过且不锁死，节省 API 配额
+                  // 若执行时已滑出屏幕，不消耗次数，等待下次滑入屏幕再触发
                   if (!strongView || !strongVM || !IsViewInViewport(strongView)) {
                       ProcessNextQueueAction();
                       return;
                   }
 
                   if (ShouldSkipTranslation(strongView, strongVM)) {
-                      objc_setAssociatedObject(strongVM, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                      objc_setAssociatedObject(strongVM, kViewModelAttemptKey, @(2), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                       ProcessNextQueueAction();
                       return;
                   }
@@ -361,15 +367,23 @@ jobs:
                   }
 
                   if (triggered) {
-                      objc_setAssociatedObject(strongVM, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                      double clickTime = CACurrentMediaTime();
+                      NSInteger nextAttempt = attempts + 1;
+                      objc_setAssociatedObject(strongVM, kViewModelAttemptKey, @(nextAttempt), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                      objc_setAssociatedObject(strongVM, kViewModelLastTimeKey, @(clickTime), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
                       if (tid) {
-                          @synchronized (gTriggeredTweetIDs) {
-                              [gTriggeredTweetIDs addObject:tid];
-                              if (gTriggeredTweetIDs.count > 4000) [gTriggeredTweetIDs removeAllObjects];
+                          [gStateLock lock];
+                          if (gTweetAttemptCount.count > 4000) {
+                              [gTweetAttemptCount removeAllObjects];
+                              [gTweetLastAttemptTime removeAllObjects];
                           }
+                          gTweetAttemptCount[tid] = @(nextAttempt);
+                          gTweetLastAttemptTime[tid] = @(clickTime);
+                          [gStateLock unlock];
                       }
-                      // 安全防限流间隔：评论区 160ms，时间线 240ms，兼顾秒开与账号配额安全
-                      NSTimeInterval delay = isComment ? 0.16 : 0.24;
+
+                      NSTimeInterval delay = isComment ? 0.14 : 0.20;
                       dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                           ProcessNextQueueAction();
                       });
@@ -378,26 +392,55 @@ jobs:
                   }
               };
 
-              [gQueueLock lock];
+              [gStateLock lock];
               if (!gActionQueue) gActionQueue = [NSMutableArray array];
-
               if (isComment) {
                   [gActionQueue insertObject:[actionBlock copy] atIndex:0];
               } else {
                   [gActionQueue addObject:[actionBlock copy]];
               }
-
-              if (gActionQueue.count > 25) {
-                  [gActionQueue removeObjectsInRange:NSMakeRange(25, gActionQueue.count - 25)];
-              }
-
               if (!gIsQueueRunning) {
                   gIsQueueRunning = YES;
                   dispatch_async(dispatch_get_main_queue(), ^{
                       ProcessNextQueueAction();
                   });
               }
-              [gQueueLock unlock];
+              [gStateLock unlock];
+          }
+
+          // 绑定并注册外语翻译视图到视口追踪器
+          static void TrackTranslateView(UIView *view, id viewModel, BOOL isComment) {
+              if (!view || !viewModel) return;
+
+              if (!IsForeignTranslatableViewModel(viewModel)) {
+                  objc_setAssociatedObject(view, kBoundViewModelKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                  return;
+              }
+
+              objc_setAssociatedObject(view, kBoundViewModelKey, viewModel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+              objc_setAssociatedObject(view, kBoundIsCommentKey, @(isComment), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+              [gStateLock lock];
+              [gTrackedViews addObject:view];
+              [gStateLock unlock];
+
+              // 延迟 80ms 待 Cell 挂载进 Window 后立即尝试一次
+              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                  TryScheduleVisibleView(view);
+              });
+          }
+
+          // 定时巡检所有进入屏幕可视区域的翻译视图
+          static void ScanTrackedViewsInViewport(void) {
+              [gStateLock lock];
+              NSArray<UIView *> *allTracked = [gTrackedViews allObjects];
+              [gStateLock unlock];
+
+              for (UIView *view in allTracked) {
+                  if (IsViewInViewport(view)) {
+                      TryScheduleVisibleView(view);
+                  }
+              }
           }
 
           // ==================== Hook 节点 ====================
@@ -412,18 +455,15 @@ jobs:
           }
 
           static void InstallHooks(void) {
-              // 1. 时间线 Grok 翻译适配器 (仅对有效外语推文显示)
+              // 1. 时间线 Grok 翻译适配器
               Class grokBtnAdapterCls = objc_getClass("T1StandardStatusGrokTranslateButtonViewAdapter");
               if (grokBtnAdapterCls) {
                   SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
                   if (CanHook(grokBtnAdapterCls, visSel)) {
                       Method m = class_getInstanceMethod(grokBtnAdapterCls, visSel);
                       if (m) {
-                          IMP orig = method_getImplementation(m);
                           method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self, id vm) {
-                              if (!IsForeignTranslatableViewModel(vm)) return NO;
-                              BOOL origVal = ((BOOL(*)(id, SEL, id))orig)(self, visSel, vm);
-                              return origVal ? YES : YES;
+                              return IsForeignTranslatableViewModel(vm);
                           }));
                       }
                   }
@@ -435,24 +475,33 @@ jobs:
                           IMP orig = method_getImplementation(m);
                           method_setImplementation(m, imp_implementationWithBlock(^void(id self, id vm, UIView *view) {
                               ((void(*)(id, SEL, id, UIView *))orig)(self, setVMSel, vm, view);
-                              ScheduleLockedAutoClick(view, vm, NO);
+                              TrackTranslateView(view, vm, NO);
+                          }));
+                      }
+                  }
+
+                  SEL updateSel = NSSelectorFromString(@"viewModel:didUpdateWithInfo:forView:");
+                  if (CanHook(grokBtnAdapterCls, updateSel)) {
+                      Method m = class_getInstanceMethod(grokBtnAdapterCls, updateSel);
+                      if (m) {
+                          IMP orig = method_getImplementation(m);
+                          method_setImplementation(m, imp_implementationWithBlock(^void(id self, id vm, id info, UIView *view) {
+                              ((void(*)(id, SEL, id, id, UIView *))orig)(self, updateSel, vm, info, view);
+                              TrackTranslateView(view, vm, NO);
                           }));
                       }
                   }
               }
 
-              // 2. 标准翻译适配器 (正文及评论区，仅对有效外语显示)
+              // 2. 标准翻译适配器 (正文及评论区)
               Class translateAdapterCls = objc_getClass("T1StandardStatusTranslateAdapter");
               if (translateAdapterCls) {
                   SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
                   if (CanHook(translateAdapterCls, visSel)) {
                       Method m = class_getInstanceMethod(translateAdapterCls, visSel);
                       if (m) {
-                          IMP orig = method_getImplementation(m);
                           method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self, id vm) {
-                              if (!IsForeignTranslatableViewModel(vm)) return NO;
-                              BOOL origVal = ((BOOL(*)(id, SEL, id))orig)(self, visSel, vm);
-                              return origVal ? YES : YES;
+                              return IsForeignTranslatableViewModel(vm);
                           }));
                       }
                   }
@@ -464,7 +513,7 @@ jobs:
                           IMP orig = method_getImplementation(m);
                           method_setImplementation(m, imp_implementationWithBlock(^void(id self, id vm, UIView *view) {
                               ((void(*)(id, SEL, id, UIView *))orig)(self, setVMSel, vm, view);
-                              ScheduleLockedAutoClick(view, vm, YES);
+                              TrackTranslateView(view, vm, YES);
                           }));
                       }
                   }
@@ -476,7 +525,7 @@ jobs:
                           IMP orig = method_getImplementation(m);
                           method_setImplementation(m, imp_implementationWithBlock(^void(id self, id vm, UIView *view) {
                               ((void(*)(id, SEL, id, UIView *))orig)(self, updateBtnSel, vm, view);
-                              ScheduleLockedAutoClick(view, vm, YES);
+                              TrackTranslateView(view, vm, YES);
                           }));
                       }
                   }
@@ -504,7 +553,7 @@ jobs:
                   }
               }
 
-              // 4. 仅解锁 FocalView 权限，保留官方原生的语种资格判定
+              // 4. 解锁 FocalView 权限
               Class grokHelperCls = objc_getClass("T1GrokPostTranslationDisplayHelper");
               if (grokHelperCls) {
                   SEL init1 = NSSelectorFromString(@"initWithStatusViewModel:account:forFocalView:");
@@ -524,12 +573,17 @@ jobs:
           __attribute__((constructor)) static void initTweak(void) {
               @autoreleasepool {
                   gHookedKeys = [[NSMutableSet alloc] init];
-                  gTriggeredTweetIDs = [[NSMutableSet alloc] init];
+                  gTweetAttemptCount = [[NSMutableDictionary alloc] init];
+                  gTweetLastAttemptTime = [[NSMutableDictionary alloc] init];
+                  gTrackedViews = [NSHashTable weakObjectsHashTable];
                   gActionQueue = [[NSMutableArray alloc] init];
-                  gQueueLock = [[NSLock alloc] init];
+                  gStateLock = [[NSLock alloc] init];
 
                   dispatch_async(dispatch_get_main_queue(), ^{
                       InstallHooks();
+                      [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer * _Nonnull timer) {
+                          ScanTrackedViewsInViewport();
+                      }];
                   });
 
                   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -543,7 +597,7 @@ jobs:
             -miphoneos-version-min=15.0 \
             -fobjc-arc \
             -fobjc-exceptions \
-            -framework Foundation -framework UIKit \
+            -framework Foundation -framework UIKit -framework QuartzCore \
             -Wno-deprecated-declarations \
             -Wl,-no_fixup_chains \
             -o output/XAutoTranslate.dylib \
