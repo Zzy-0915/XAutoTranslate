@@ -5,7 +5,7 @@ include $(THEOS)/makefiles/common.mk
 
 LIBRARY_NAME = XAutoTranslate
 
-XAutoTranslate_FILES = $(wildcard *.m) $(wildcard *.x)
+XAutoTranslate_FILES = Tweak.m
 XAutoTranslate_CFLAGS = -fobjc-arc
 XAutoTranslate_FRAMEWORKS = UIKit Foundation
 XAutoTranslate_LDFLAGS = -Wl,-no_fixup_chains
