@@ -1,4 +1,4 @@
-name: Build JailFools Dylib (Stable Translation)
+name: Build JailFools Dylib (No Layout Hooks)
 
 on:
   push:
@@ -29,17 +29,15 @@ jobs:
           #import <objc/message.h>
           #import <math.h>
 
-          // UI state is accessed on the main thread; network caches are locked.
           static NSMutableSet *gHookedKeys, *gInFlight;
           static NSMutableDictionary *gTextCache, *gLangCache, *gRetryAfter;
           static NSHashTable<UIView *> *gViews;
           static NSLock *gLock;
-          static char kVM, kID, kStatus, kSavedAlpha, kOriginalBody, kBodyOverlay, kHostViews;
+          static char kVM, kID, kStatus, kSavedAlpha, kOriginalBody, kBodyOverlay;
           static NSMutableSet *gShowOriginal;
           static NSMutableDictionary *gOriginalCache, *gFallbackIDs;
           static BOOL gEnforcing = NO;
           static void InspectAndTranslateView(UIView *view);
-          static void InstallLayoutHook(Class cls);
           static const NSInteger kBodyTag = 998872, kStatusTag = 998873;
 
           @interface XTranslationButton : UIButton
@@ -113,7 +111,6 @@ jobs:
               return foreign>=4;
           }
 
-          // Bound recursion and detect cycles in private model graphs.
           static NSArray *SubKeys(void) {
               return @[@"statusViewModel",@"representedStatus",@"status",@"tweet",@"conversationNode"];
           }
@@ -254,7 +251,6 @@ jobs:
               return best;
           }
 
-          // Hide native text and leading icon; preserve the original button hit area.
           static void RestoreNativeText(UIView *view) {
               NSMutableArray *subs=[NSMutableArray arrayWithObject:view];
               CollectSubviews(view,subs);
@@ -274,17 +270,6 @@ jobs:
               RestoreNativeText(view);
           }
 
-          static void RegisterHost(UIView *view, UIView *host) {
-              NSHashTable *views=objc_getAssociatedObject(host,&kHostViews);
-              if (!views) {
-                  views=[NSHashTable weakObjectsHashTable];
-                  objc_setAssociatedObject(host,&kHostViews,views,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-              }
-              [views addObject:view];
-              InstallLayoutHook(host.class);
-              InstallLayoutHook(view.class);
-          }
-
           static void LayoutStatus(UIView *view) {
               XTranslationButton *button=objc_getAssociatedObject(view,&kStatus);
               if (!button) return;
@@ -293,7 +278,6 @@ jobs:
                   button.hidden=YES;
                   return;
               }
-              RegisterHost(view,host);
               if (button.superview!=host) {
                   [button removeFromSuperview];
                   [host addSubview:button];
@@ -317,17 +301,18 @@ jobs:
               button.hidden=view.hidden || view.alpha<0.01 || available<=0;
               button.alpha=view.alpha;
               button.backgroundColor=ResolveBackgroundColor(host);
-              [host bringSubviewToFront:button];
+              if (host.subviews.lastObject!=button) [host bringSubviewToFront:button];
           }
 
           static void TransformNativeTranslateButton(UIView *view, NSString *lang, BOOL finished) {
               if (!view) return;
               XTranslationButton *button=objc_getAssociatedObject(view,&kStatus);
               if (!button) {
-                  button=[XTranslationButton buttonWithType:UIButtonTypeCustom];
+                  button=[[XTranslationButton alloc] initWithFrame:CGRectZero];
                   button.tag=kStatusTag;
                   button.translationView=view;
                   button.titleLabel.font=[UIFont systemFontOfSize:11 weight:UIFontWeightRegular];
+                  [button setTitleColor:UIColor.secondaryLabelColor forState:UIControlStateNormal];
                   button.titleLabel.numberOfLines=1;
                   button.titleLabel.lineBreakMode=NSLineBreakByClipping;
                   button.titleLabel.adjustsFontSizeToFitWidth=YES;
@@ -340,8 +325,7 @@ jobs:
               BOOL original=[gShowOriginal containsObject:tid];
               NSString *title=!finished ? @"正在翻译…" : original ? @"原文 · 显示译文" : [NSString stringWithFormat:@"%@ 已翻译 · 查看原文",lang ?: @"外语"];
               if (![button.currentTitle isEqualToString:title]) [button setTitle:title forState:UIControlStateNormal];
-              [button setTitleColor:UIColor.secondaryLabelColor forState:UIControlStateNormal];
-              button.enabled=finished;
+              if (button.enabled!=finished) button.enabled=finished;
               button.accessibilityLabel=title;
               LayoutStatus(view);
           }
@@ -380,10 +364,7 @@ jobs:
               [gLock unlock];
               if (!original.length) original=ExtractModelRawText(objc_getAssociatedObject(view,&kVM)) ?: raw;
               objc_setAssociatedObject(body,&kOriginalBody,original,OBJC_ASSOCIATION_COPY_NONATOMIC);
-              RegisterHost(view,container);
-              InstallLayoutHook(body.class);
 
-              // Keep the overlay on the stable container, outside X's body renderer.
               XTopAlignedLabel *overlay=objc_getAssociatedObject(view,&kBodyOverlay);
               if (!overlay) {
                   overlay=XTopAlignedLabel.new;
@@ -408,7 +389,11 @@ jobs:
               overlay.alpha=1;
               NSString *display=[gShowOriginal containsObject:tid] ? (original ?: raw ?: @"") : text;
               if (![overlay.text isEqualToString:display]) overlay.text=display;
-              [container bringSubviewToFront:overlay];
+
+              UIView *status=objc_getAssociatedObject(view,&kStatus);
+              NSUInteger count=container.subviews.count;
+              BOOL front=count>1 && container.subviews[count-2]==overlay && container.subviews.lastObject==status;
+              if (!front) [container bringSubviewToFront:overlay];
               TransformNativeTranslateButton(view,lang,YES);
           }
 
@@ -419,7 +404,6 @@ jobs:
           }
 
           static void InspectAndTranslateView(UIView *view) {
-              LayoutStatus(view);
               if (!IsViewInViewport(view)) return;
               id vm=objc_getAssociatedObject(view,&kVM);
               NSString *tid=objc_getAssociatedObject(view,&kID);
@@ -435,7 +419,11 @@ jobs:
                   ApplyFallbackOverlay(view,cached,lang,tid);
                   return;
               }
-              if (busy || (retry && retry.timeIntervalSinceNow>0)) return;
+              if (busy) {
+                  LayoutStatus(view);
+                  return;
+              }
+              if (retry && retry.timeIntervalSinceNow>0) return;
 
               NSString *raw=ExtractModelRawText(vm), *viewText=nil;
               UIView *body=FindBodyTextViewInContainer(FindTweetContainerView(view),view,&viewText);
@@ -483,7 +471,6 @@ jobs:
                   [gLock lock];
                   [gInFlight removeObject:tid];
                   if (translated.length) {
-                      // Preserve completed translations for this process lifetime.
                       gTextCache[tid]=translated;
                       gLangCache[tid]=friendly;
                       if ([tid hasPrefix:@"text:"]) gFallbackIDs[translated]=tid;
@@ -510,18 +497,15 @@ jobs:
                   return;
               }
               NSString *oldID=objc_getAssociatedObject(view,&kID);
-
-              // A transient nil model must not clear a locked translation.
-              // Actual cell reuse is handled by prepareForReuse.
               if (!vm) return;
+
               NSString *tid=ExtractRealTweetID(vm);
               [gLock lock];
               NSString *cached=tid ? gTextCache[tid] : nil;
               [gLock unlock];
-
               BOOL sameTweet=oldID && [oldID isEqualToString:tid];
-              if (oldID && !sameTweet) CleanOverlays(FindTweetContainerView(view) ?: view);
 
+              if (oldID && !sameTweet) CleanOverlays(FindTweetContainerView(view) ?: view);
               if (!sameTweet && !cached.length && !IsForeignTranslatableViewModel(vm)) {
                   ClearStatus(view);
                   objc_setAssociatedObject(view,&kVM,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -532,15 +516,12 @@ jobs:
               objc_setAssociatedObject(view,&kVM,vm,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
               objc_setAssociatedObject(view,&kID,tid,OBJC_ASSOCIATION_COPY_NONATOMIC);
               [gViews addObject:view];
-
-              // Restore synchronously after native binding.
               InspectAndTranslateView(view);
               dispatch_async(dispatch_get_main_queue(),^{
                   if (MatchesBinding(view,tid)) InspectAndTranslateView(view);
               });
           }
 
-          // Replace methods on the requested class without mutating inherited methods.
           static void ReplaceMethod(Class cls, SEL sel, IMP replacement, const char *types) {
               if (!class_addMethod(cls,sel,replacement,types)) class_replaceMethod(cls,sel,replacement,types);
           }
@@ -551,32 +532,6 @@ jobs:
               if ([gHookedKeys containsObject:key]) return NO;
               [gHookedKeys addObject:key];
               return YES;
-          }
-
-          static void RefreshLockedViews(UIView *node) {
-              if (gEnforcing || ![NSThread isMainThread]) return;
-              gEnforcing=YES;
-              @try {
-                  for (UIView *host=node; host; host=host.superview) {
-                      NSHashTable *views=objc_getAssociatedObject(host,&kHostViews);
-                      for (UIView *view in views.allObjects) {
-                          if (FindTweetContainerView(view)==host) InspectAndTranslateView(view);
-                      }
-                  }
-              } @finally {
-                  gEnforcing=NO;
-              }
-          }
-
-          static void InstallLayoutHook(Class cls) {
-              SEL sel=@selector(layoutSubviews);
-              if (!BeginHook(cls,sel)) return;
-              Method m=class_getInstanceMethod(cls,sel);
-              IMP original=method_getImplementation(m);
-              ReplaceMethod(cls,sel,imp_implementationWithBlock(^(UIView *self){
-                  ((void(*)(id,SEL))original)(self,sel);
-                  RefreshLockedViews(self);
-              }),method_getTypeEncoding(m));
           }
 
           static void HookReuse(Class cls) {
@@ -636,11 +591,18 @@ jobs:
 
                   dispatch_async(dispatch_get_main_queue(),^{
                       InstallHooks();
-                      NSTimer *timer=[NSTimer timerWithTimeInterval:0.20 repeats:YES block:^(NSTimer *timer){
-                          for (UIView *view in gViews.allObjects) InspectAndTranslateView(view);
+                      NSTimer *timer=[NSTimer timerWithTimeInterval:0.50 repeats:YES block:^(NSTimer *timer){
+                          if (gEnforcing || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
+                          gEnforcing=YES;
+                          @try {
+                              for (UIView *view in gViews.allObjects) InspectAndTranslateView(view);
+                          } @finally {
+                              gEnforcing=NO;
+                          }
                       }];
                       [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
                   });
+
                   dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
                       InstallHooks();
                   });
