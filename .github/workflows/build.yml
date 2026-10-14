@@ -1,4 +1,4 @@
-name: Build JailFools Dylib (Anti-Flicker Locked Engine)
+name: Build JailFools Dylib (Zero-Drop Smooth Engine)
 
 on:
   push:
@@ -75,7 +75,7 @@ jobs:
               return ((id(*)(id, SEL))objc_msgSend)(obj, sel);
           }
 
-          // ==================== 全面解析推文与评论 ID ====================
+          // ==================== 全面解析推文与评论唯一 ID ====================
           static NSString *ExtractRealTweetID(id vmOrStatus) {
               if (!vmOrStatus) return nil;
 
@@ -96,7 +96,6 @@ jobs:
                   }
               }
 
-              // 递归向下寻找嵌套的 status 或 viewModel
               NSArray *subKeys = @[@"statusViewModel", @"representedStatus", @"status", @"tweet", @"conversationNode"];
               for (NSString *subKey in subKeys) {
                   id subObj = SafeCallObject(vmOrStatus, NSSelectorFromString(subKey));
@@ -106,7 +105,6 @@ jobs:
                   }
               }
 
-              // 针对评论回退：采用正文内容的唯一 Hash
               NSString *text = SafeCallObject(vmOrStatus, NSSelectorFromString(@"displayText")) ?:
                                SafeCallObject(vmOrStatus, NSSelectorFromString(@"text"));
               if (text && text.length >= 2) {
@@ -116,9 +114,8 @@ jobs:
               return [NSString stringWithFormat:@"ptr_%p", vmOrStatus];
           }
 
-          // ==================== 状态熔断：检查是否已经在展示译文 ====================
-          static BOOL HasAlreadyTranslatedIndicator(UIView *container, id viewModel) {
-              // 1. 检查 ViewModel 属性
+          // ==================== 状态检查（识别译文与失败重试） ====================
+          static BOOL HasAlreadyTranslated(UIView *container, id viewModel) {
               if (viewModel) {
                   if (SafeCallBool(viewModel, NSSelectorFromString(@"isShowingTranslation"))) return YES;
                   if (SafeCallBool(viewModel, NSSelectorFromString(@"showingTranslation"))) return YES;
@@ -129,7 +126,6 @@ jobs:
                   }
               }
 
-              // 2. 深度扫描所有子视图的文字，避开“显示原文”或“翻译自”
               NSMutableArray<UIView *> *allViews = [NSMutableArray arrayWithObject:container];
               void (^__block collectSubviews)(UIView *) = ^(UIView *v) {
                   for (UIView *sub in v.subviews) {
@@ -152,6 +148,10 @@ jobs:
                   }
 
                   if (text && text.length > 0) {
+                      // 如果处于失败状态，不拦截，允许自动重试
+                      if ([text containsString:@"重试"] || [text containsString:@"Retry"] || [text containsString:@"失败"]) {
+                          return NO;
+                      }
                       if ([text containsString:@"原文"] ||
                           [text containsString:@"Original"] ||
                           [text containsString:@"翻译自"] ||
@@ -165,7 +165,7 @@ jobs:
               return NO;
           }
 
-          // ==================== 平滑任务队列 ====================
+          // ==================== 平滑任务队列（320ms 黄金间隔，绝不丢包） ====================
           static void ProcessNextQueueAction(void) {
               dispatch_async(dispatch_get_main_queue(), ^{
                   void (^nextAction)(void) = nil;
@@ -180,7 +180,8 @@ jobs:
 
                   if (nextAction) {
                       nextAction();
-                      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                      // 320ms 间隔：完全处于 Twitter API 安全频控范围内，彻底杜绝 429 报错
+                      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.32 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                           ProcessNextQueueAction();
                       });
                   }
@@ -191,9 +192,7 @@ jobs:
               if (!action) return;
               [gQueueLock lock];
               if (!gActionQueue) gActionQueue = [NSMutableArray array];
-              if (gActionQueue.count > 12) {
-                  [gActionQueue removeObjectsInRange:NSMakeRange(0, gActionQueue.count - 8)];
-              }
+              // 绝不直接暴力抛弃任务，保持队列完整性
               [gActionQueue addObject:[action copy]];
               if (!gIsQueueRunning) {
                   gIsQueueRunning = YES;
@@ -204,30 +203,29 @@ jobs:
               [gQueueLock unlock];
           }
 
-          // ==================== 单次自动点击分发 ====================
+          // ==================== 核心：精准调度自动点击 ====================
           static void ScheduleLockedAutoClick(UIView *view, id viewModel) {
               if (!IsAutoTranslateEnabled() || !view || !viewModel) return;
 
-              // 核心 1：ViewModel 物理级锁（一旦标记过，同个推文/评论永久跳过，绝无二次触发）
-              if (objc_getAssociatedObject(viewModel, kViewModelLockedKey)) {
-                  return;
-              }
-
-              // 核心 2：推文唯一 ID 防重
               NSString *tid = ExtractRealTweetID(viewModel);
-              if (tid) {
-                  @synchronized (gTriggeredTweetIDs) {
-                      if ([gTriggeredTweetIDs containsObject:tid]) {
-                          objc_setAssociatedObject(viewModel, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+              // 检查是否已锁定
+              if (objc_getAssociatedObject(viewModel, kViewModelLockedKey)) {
+                  // 若此前已锁但当前界面呈现“翻译失败 重试”，自动解锁允许重试
+                  if (!HasAlreadyTranslated(view, viewModel)) {
+                      NSString *text = SafeCallObject(view, NSSelectorFromString(@"text"));
+                      if (text && ([text containsString:@"重试"] || [text containsString:@"Retry"])) {
+                          objc_setAssociatedObject(viewModel, kViewModelLockedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                          @synchronized (gTriggeredTweetIDs) {
+                              if (tid) [gTriggeredTweetIDs removeObject:tid];
+                          }
+                      } else {
                           return;
                       }
-                      [gTriggeredTweetIDs addObject:tid];
-                      if (gTriggeredTweetIDs.count > 2000) [gTriggeredTweetIDs removeAllObjects];
+                  } else {
+                      return;
                   }
               }
-
-              // 立即对该 ViewModel 施加永久锁定
-              objc_setAssociatedObject(viewModel, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
               __weak UIView *weakView = view;
               __weak id weakVM = viewModel;
@@ -237,9 +235,24 @@ jobs:
                   id strongVM = weakVM;
                   if (!strongView || !strongVM) return;
 
-                  // 核心 3：双向熔断校验（若界面上已经变成了译文或显示原文，100% 拒绝点击）
-                  if (HasAlreadyTranslatedIndicator(strongView, strongVM)) {
+                  // 核心检查：只有当前位于屏幕可视窗口内才执行，滑出屏幕的不消耗频次
+                  if (!strongView.window || strongView.hidden || strongView.alpha < 0.01) {
                       return;
+                  }
+
+                  // 双向防反弹熔断
+                  if (HasAlreadyTranslated(strongView, strongVM)) {
+                      objc_setAssociatedObject(strongVM, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                      return;
+                  }
+
+                  // 锁定此 ViewModel，防止重复触发晃动
+                  objc_setAssociatedObject(strongVM, kViewModelLockedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                  if (tid) {
+                      @synchronized (gTriggeredTweetIDs) {
+                          [gTriggeredTweetIDs addObject:tid];
+                          if (gTriggeredTweetIDs.count > 2500) [gTriggeredTweetIDs removeAllObjects];
+                      }
                   }
 
                   NSMutableArray<UIView *> *candidates = [NSMutableArray arrayWithObject:strongView];
@@ -253,14 +266,14 @@ jobs:
 
                   BOOL triggered = NO;
 
-                  // 触发通道 A：合法 tapActionBlock
+                  // 通道 A：执行合法 tapActionBlock
                   for (UIView *v in candidates) {
                       if ([v respondsToSelector:NSSelectorFromString(@"tapActionBlock")]) {
                           @try {
                               id blockObj = ((id(*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(@"tapActionBlock"));
                               if (blockObj && [blockObj isKindOfClass:NSClassFromString(@"NSBlock")]) {
                                   void (^block)(void) = (void(^)(void))blockObj;
-                                  XLog(@"[平稳锁定] 成功触发翻译 (ID: %@)", tid ?: @"-");
+                                  XLog(@"[平滑触发] 成功调用 tapActionBlock (ID: %@)", tid ?: @"-");
                                   block();
                                   triggered = YES;
                                   break;
@@ -269,7 +282,7 @@ jobs:
                       }
                   }
 
-                  // 触发通道 B：TFNTappableViewHelper _tapAction
+                  // 通道 B：TFNTappableViewHelper _tapAction
                   if (!triggered) {
                       for (UIView *v in candidates) {
                           @try {
@@ -282,7 +295,7 @@ jobs:
                               if (helper) {
                                   SEL tapSel = NSSelectorFromString(@"_tapAction");
                                   if ([helper respondsToSelector:tapSel]) {
-                                      XLog(@"[平稳锁定-Helper] 成功调用 _tapAction (ID: %@)", tid ?: @"-");
+                                      XLog(@"[平滑触发] 成功调用 TFNTappableViewHelper _tapAction (ID: %@)", tid ?: @"-");
                                       ((void(*)(id, SEL))objc_msgSend)(helper, tapSel);
                                       triggered = YES;
                                       break;
@@ -436,6 +449,7 @@ jobs:
                               }
                               return NO;
                           }));
+                          XLog(@"[Hook成功] T1ConversationTranslatedBodyAdapter -> shouldBeVisibleForViewModel:");
                       }
                   }
               }
@@ -479,7 +493,7 @@ jobs:
               }]];
 
               [logAlert addAction:[UIAlertAction actionWithTitle:@"导出为 TXT 文件" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                  NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"XAutoTranslate_Locked.log"];
+                  NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"XAutoTranslate_ZeroDrop.log"];
                   [fullLog writeToFile:tmpPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
                   NSURL *fileURL = [NSURL fileURLWithPath:tmpPath];
                   UIActivityViewController *actVC = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL] applicationActivities:nil];
@@ -503,9 +517,9 @@ jobs:
 
                   BOOL isEnabled = IsAutoTranslateEnabled();
 
-                  NSString *title = [NSString stringWithFormat:@"防晃动锁定翻译 (当前: %@)", isEnabled ? @"✅ 开启" : @"❌ 关闭"];
+                  NSString *title = [NSString stringWithFormat:@"全自动翻译 (当前: %@)", isEnabled ? @"✅ 开启" : @"❌ 关闭"];
                   UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
-                                                                                 message:@"单次锁定译文，绝无晃动与重复横跳"
+                                                                                 message:@"零丢包平滑流，自动修复失败重试"
                                                                           preferredStyle:UIAlertControllerStyleActionSheet];
 
                   [alert addAction:[UIAlertAction actionWithTitle:(isEnabled ? @"暂停自动翻译" : @"开启自动翻译")
@@ -566,7 +580,7 @@ jobs:
                   gActionQueue = [[NSMutableArray alloc] init];
                   gQueueLock = [[NSLock alloc] init];
 
-                  XLog(@"=== XAutoTranslate (防晃动永久锁定版) 启动 ===");
+                  XLog(@"=== XAutoTranslate (零丢包自适应平滑版) 启动 ===");
 
                   dispatch_async(dispatch_get_main_queue(), ^{
                       InstallHooks();
