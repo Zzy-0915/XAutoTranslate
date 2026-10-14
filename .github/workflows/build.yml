@@ -28,6 +28,7 @@ jobs:
           static NSMutableSet<NSString *> *gHookedKeys = nil;
           static NSMutableSet<NSString *> *gFallbackInFlightIDs = nil;
           static NSMutableDictionary<NSString *, NSString *> *gFallbackTranslatedCache = nil;
+          static NSMutableDictionary<NSString *, NSString *> *gFallbackLangCache = nil;
           static NSHashTable<UIView *> *gTrackedViews = nil;
           static NSLock *gStateLock = nil;
 
@@ -37,8 +38,8 @@ jobs:
           static const NSInteger kFallbackBtnOverlayTag = 998871;
           static const NSInteger kFallbackBodyOverlayTag = 998872;
 
-          // 顶部对齐文本标签，确保多行译文贴合原排版
           @interface XTopAlignedLabel : UILabel
+          @property (nonatomic, copy) NSString *boundTweetID;
           @end
 
           @implementation XTopAlignedLabel
@@ -53,6 +54,28 @@ jobs:
               NSMethodSignature *sig = [obj methodSignatureForSelector:sel];
               if (!sig || sig.numberOfArguments != 2 || sig.methodReturnType[0] != '@') return nil;
               return ((id(*)(id, SEL))objc_msgSend)(obj, sel);
+          }
+
+          // ==================== 语种代码映射为友好中文 ====================
+          static NSString *FriendlyLanguageName(NSString *code) {
+              if (!code || code.length == 0) return @"外语";
+              NSString *lower = [code lowercaseString];
+              if ([lower hasPrefix:@"en"]) return @"英语";
+              if ([lower hasPrefix:@"ko"]) return @"韩语";
+              if ([lower hasPrefix:@"ja"]) return @"日语";
+              if ([lower hasPrefix:@"fr"]) return @"法语";
+              if ([lower hasPrefix:@"de"]) return @"德语";
+              if ([lower hasPrefix:@"es"]) return @"西班牙语";
+              if ([lower hasPrefix:@"ru"]) return @"俄语";
+              if ([lower hasPrefix:@"ar"]) return @"阿拉伯语";
+              if ([lower hasPrefix:@"pt"]) return @"葡萄牙语";
+              if ([lower hasPrefix:@"it"]) return @"意大利语";
+              if ([lower hasPrefix:@"th"]) return @"泰语";
+              if ([lower hasPrefix:@"vi"]) return @"越南语";
+              if ([lower hasPrefix:@"tr"]) return @"土耳其语";
+              if ([lower hasPrefix:@"id"]) return @"印尼语";
+              if ([lower hasPrefix:@"nl"]) return @"荷兰语";
+              return @"外语";
           }
 
           // ==================== 语种与有效外文过滤 ====================
@@ -314,17 +337,14 @@ jobs:
               return bestView;
           }
 
-          static void ClearFallbackOverlays(UIView *translateView) {
-              if (!translateView) return;
-              [[translateView viewWithTag:kFallbackBtnOverlayTag] removeFromSuperview];
-              UIView *container = FindTweetContainerView(translateView);
-              if (container) {
-                  NSMutableArray<UIView *> *allSubs = [NSMutableArray array];
-                  CollectSubviews(container, allSubs);
-                  for (UIView *sub in allSubs) {
-                      if (sub.tag == kFallbackBodyOverlayTag || sub.tag == kFallbackBtnOverlayTag) {
-                          [sub removeFromSuperview];
-                      }
+          // 递归清理旧覆盖层（杜绝文字重叠）
+          static void CleanAllOverlaysInHierarchy(UIView *view) {
+              if (!view) return;
+              NSMutableArray<UIView *> *allSubs = [NSMutableArray array];
+              CollectSubviews(view, allSubs);
+              for (UIView *sub in allSubs) {
+                  if (sub.tag == kFallbackBtnOverlayTag || sub.tag == kFallbackBodyOverlayTag) {
+                      [sub removeFromSuperview];
                   }
               }
           }
@@ -336,20 +356,20 @@ jobs:
 
               UILabel *btnOverlay = (UILabel *)[translateView viewWithTag:kFallbackBtnOverlayTag];
               if (!btnOverlay) {
-                  btnOverlay = [[UILabel alloc] initWithFrame:translateView.bounds];
+                  // 高度限制在 14pt，字体缩小至 10.5pt，绝不压迫正文
+                  btnOverlay = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, translateView.bounds.size.width, 14.0)];
                   btnOverlay.tag = kFallbackBtnOverlayTag;
-                  btnOverlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-                  btnOverlay.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightRegular];
+                  btnOverlay.font = [UIFont systemFontOfSize:10.5 weight:UIFontWeightRegular];
                   btnOverlay.textColor = [UIColor secondaryLabelColor];
                   btnOverlay.userInteractionEnabled = NO;
                   [translateView addSubview:btnOverlay];
               }
-              btnOverlay.frame = translateView.bounds;
+              btnOverlay.frame = CGRectMake(0, 0, translateView.bounds.size.width, 14.0);
               btnOverlay.backgroundColor = bgColor;
               btnOverlay.text = statusTitle;
           }
 
-          static void ApplyFallbackOverlay(UIView *translateView, NSString *translatedText) {
+          static void ApplyFallbackOverlay(UIView *translateView, NSString *translatedText, NSString *langName, NSString *tid) {
               if (!translateView || translatedText.length == 0) return;
 
               UIView *container = FindTweetContainerView(translateView);
@@ -361,7 +381,9 @@ jobs:
 
               UIColor *bgColor = ResolveBackgroundColor(container);
 
-              ApplyStatusHeaderOverlay(translateView, @"🌐 已自动翻译");
+              // 按照你的要求：无图标，小字号，精准显示“翻译自 语种 已翻译✅”
+              NSString *headerStr = [NSString stringWithFormat:@"翻译自 %@  已翻译✅", langName ?: @"外语"];
+              ApplyStatusHeaderOverlay(translateView, headerStr);
 
               XTopAlignedLabel *bodyOverlay = (XTopAlignedLabel *)[bodyView viewWithTag:kFallbackBodyOverlayTag];
               if (!bodyOverlay) {
@@ -377,12 +399,13 @@ jobs:
                   bodyOverlay.userInteractionEnabled = NO;
                   [bodyView addSubview:bodyOverlay];
               }
+              bodyOverlay.boundTweetID = tid;
               bodyOverlay.frame = bodyView.bounds;
               bodyOverlay.backgroundColor = bgColor;
               bodyOverlay.text = translatedText;
           }
 
-          // ==================== 唯一翻译引擎：Google GTX 免限流直连引擎 ====================
+          // ==================== 唯一翻译引擎：Google GTX 直连免限流引擎 ====================
           static BOOL IsViewInViewport(UIView *view) {
               if (!view || !view.window || view.hidden || view.alpha < 0.01) return NO;
               if (view.bounds.size.width < 10.0 || view.bounds.size.height < 5.0) return NO;
@@ -397,12 +420,13 @@ jobs:
               if (!translateView || !viewModel || !tid) return;
 
               [gStateLock lock];
-              NSString *cached = gFallbackTranslatedCache[tid];
+              NSString *cachedText = gFallbackTranslatedCache[tid];
+              NSString *cachedLang = gFallbackLangCache[tid];
               BOOL inFlight = [gFallbackInFlightIDs containsObject:tid];
               [gStateLock unlock];
 
-              if (cached.length > 0) {
-                  ApplyFallbackOverlay(translateView, cached);
+              if (cachedText.length > 0) {
+                  ApplyFallbackOverlay(translateView, cachedText, cachedLang, tid);
                   return;
               }
               if (inFlight) return;
@@ -415,10 +439,9 @@ jobs:
                   bodyText = viewText;
               }
 
-              // 等待正文视图完成布局后再拉取并渲染
               if (!bodyView || !bodyText || !IsValidForeignText(bodyText)) return;
 
-              ApplyStatusHeaderOverlay(translateView, @"🌐 正在翻译...");
+              ApplyStatusHeaderOverlay(translateView, @"正在翻译...");
 
               [gStateLock lock];
               [gFallbackInFlightIDs addObject:tid];
@@ -446,6 +469,8 @@ jobs:
 
               NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
                   NSMutableString *resultText = [NSMutableString string];
+                  NSString *detectedLangCode = nil;
+
                   if (data && !error) {
                       id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
                       if ([json isKindOfClass:[NSArray class]] && [(NSArray *)json count] > 0) {
@@ -460,14 +485,24 @@ jobs:
                                   }
                               }
                           }
+                          // Google GTX 返回的第 3 个字段为识别到的源语言代码 (例如 "ko", "ja", "en")
+                          if ([(NSArray *)json count] >= 3 && [json[2] isKindOfClass:[NSString class]]) {
+                              detectedLangCode = json[2];
+                          }
                       }
                   }
+
+                  NSString *friendlyLang = FriendlyLanguageName(detectedLangCode);
 
                   [gStateLock lock];
                   [gFallbackInFlightIDs removeObject:tid];
                   if (resultText.length > 0) {
-                      if (gFallbackTranslatedCache.count > 3000) [gFallbackTranslatedCache removeAllObjects];
+                      if (gFallbackTranslatedCache.count > 3000) {
+                          [gFallbackTranslatedCache removeAllObjects];
+                          [gFallbackLangCache removeAllObjects];
+                      }
                       gFallbackTranslatedCache[tid] = [resultText copy];
+                      gFallbackLangCache[tid] = friendlyLang;
                   }
                   [gStateLock unlock];
 
@@ -477,7 +512,7 @@ jobs:
                           id strongVM = weakVM;
                           if (!strongView || !strongVM) return;
                           if (objc_getAssociatedObject(strongView, kBoundViewModelKey) == strongVM) {
-                              ApplyFallbackOverlay(strongView, resultText);
+                              ApplyFallbackOverlay(strongView, resultText, friendlyLang, tid);
                           }
                       });
                   }
@@ -502,7 +537,9 @@ jobs:
 
               id oldVM = objc_getAssociatedObject(view, kBoundViewModelKey);
               if (oldVM != viewModel) {
-                  ClearFallbackOverlays(view);
+                  // Cell 复用发生，彻底清理当前及其容器内的所有旧译文覆盖层，杜绝重叠！
+                  UIView *container = FindTweetContainerView(view);
+                  CleanAllOverlaysInHierarchy(container ?: view);
               }
 
               if (!IsForeignTranslatableViewModel(viewModel)) {
@@ -516,12 +553,13 @@ jobs:
 
               [gStateLock lock];
               [gTrackedViews addObject:view];
-              NSString *cachedFallback = tid ? gFallbackTranslatedCache[tid] : nil;
+              NSString *cachedText = tid ? gFallbackTranslatedCache[tid] : nil;
+              NSString *cachedLang = tid ? gFallbackLangCache[tid] : nil;
               [gStateLock unlock];
 
               dispatch_async(dispatch_get_main_queue(), ^{
-                  if (cachedFallback.length > 0) {
-                      ApplyFallbackOverlay(view, cachedFallback);
+                  if (cachedText.length > 0) {
+                      ApplyFallbackOverlay(view, cachedText, cachedLang, tid);
                   } else {
                       InspectAndTranslateView(view);
                   }
@@ -553,8 +591,27 @@ jobs:
               }
           }
 
+          static void HookCellPrepareForReuse(Class cellClass) {
+              if (!cellClass) return;
+              SEL sel = @selector(prepareForReuse);
+              if (CanHook(cellClass, sel)) {
+                  Method m = class_getInstanceMethod(cellClass, sel);
+                  if (m) {
+                      IMP orig = method_getImplementation(m);
+                      method_setImplementation(m, imp_implementationWithBlock(^void(UIView *self) {
+                          CleanAllOverlaysInHierarchy(self);
+                          ((void(*)(id, SEL))orig)(self, sel);
+                      }));
+                  }
+              }
+          }
+
           static void InstallHooks(void) {
-              // 1. 时间线翻译栏适配器
+              // 1. Hook 列表复用重置，保证滑走复用时彻底清理旧文本，绝不重叠
+              HookCellPrepareForReuse(objc_getClass("UITableViewCell"));
+              HookCellPrepareForReuse(objc_getClass("UICollectionViewCell"));
+
+              // 2. 时间线翻译栏适配器
               Class grokBtnAdapterCls = objc_getClass("T1StandardStatusGrokTranslateButtonViewAdapter");
               if (grokBtnAdapterCls) {
                   SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
@@ -580,7 +637,7 @@ jobs:
                   }
               }
 
-              // 2. 详情页与评论区翻译栏适配器
+              // 3. 详情页与评论区翻译栏适配器
               Class translateAdapterCls = objc_getClass("T1StandardStatusTranslateAdapter");
               if (translateAdapterCls) {
                   SEL visSel = NSSelectorFromString(@"shouldBeVisibleForViewModel:");
@@ -613,6 +670,7 @@ jobs:
                   gHookedKeys = [[NSMutableSet alloc] init];
                   gFallbackInFlightIDs = [[NSMutableSet alloc] init];
                   gFallbackTranslatedCache = [[NSMutableDictionary alloc] init];
+                  gFallbackLangCache = [[NSMutableDictionary alloc] init];
                   gTrackedViews = [NSHashTable weakObjectsHashTable];
                   gStateLock = [[NSLock alloc] init];
 
