@@ -263,6 +263,10 @@ int main(void) {@autoreleasepool {
     [paused setEligibleKeys:NSSet.set];
     Check(Wait(^BOOL{return [paused cached:@"keep"]!=nil;}),@"already-started result may complete into cache");
     Check(Count(@"OffscreenQueued")==0,@"completion pump never starts a queued item after scrolling resumes");[paused invalidate];
+    XGTXEngine *live=Engine(^NSTimeInterval{return NSDate.timeIntervalSinceReferenceDate;},0);
+    [live setEligibleKeys:[NSSet setWithObject:@"stale-eligible"]];live.admitRequest=^BOOL(NSString *key){(void)key;return NO;};
+    [live enqueue:@"stale-eligible" text:@"MovedBetweenTicks" language:@"en"];
+    Check(Count(@"MovedBetweenTicks")==0 && [live.statistics[@"requests"] unsignedIntegerValue]==0,@"live start guard closes the motion/background race between polling ticks");[live invalidate];
 
     now=6000;XGTXEngine *strict=Engine(^NSTimeInterval{return now;},0);__block NSUInteger starts=0;
     XTranslationRouter *policy=[[XTranslationRouter alloc] initWithEngine:strict clock:^NSTimeInterval{return now;} start:^BOOL(id context){(void)context;starts++;return YES;} inspect:^XOfficialObservation *(id context){return context;}];

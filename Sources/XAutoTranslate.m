@@ -274,6 +274,14 @@ static void Install(void) {
     if(animated) animatedUpdateKey=*(__unsafe_unretained id *)animated;
     engine=[[XGTXEngine alloc] initWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration clock:^NSTimeInterval{return NSProcessInfo.processInfo.systemUptime;} interval:1.0];
     [engine setEligibleKeys:NSSet.set];
+    engine.admitRequest=^BOOL(NSString *key){
+        if(UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return NO;
+        for(UIView *view in views.allObjects) {
+            if(!Visible(view) || !Stationary(view)) continue;
+            XATSource *source=ViewSource(view);
+            if([source.key isEqual:key] && Eligible(view,source)) return YES;
+        }return NO;
+    };
     Class helperClass=NSClassFromString(@"T1PostTranslationHelper");
     translationHelper=Object(helperClass,@"shared");
     currentLanguage=dlsym(RTLD_DEFAULT,"TFSCurrentLanguageCode");

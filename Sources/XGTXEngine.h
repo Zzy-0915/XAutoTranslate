@@ -15,6 +15,7 @@ FOUNDATION_EXPORT NSArray<NSString *> *XGTXChunks(NSString *text);
 
 @interface XGTXEngine : NSObject <NSURLSessionTaskDelegate>
 @property(nonatomic,copy,nullable) void (^didFinish)(NSString *key);
+@property(nonatomic,copy,nullable) BOOL (^admitRequest)(NSString *key);
 // All scheduling APIs run on main; successful cache reads are safe on any thread.
 - (instancetype)initWithConfiguration:(NSURLSessionConfiguration *)configuration
                                 clock:(NSTimeInterval (^)(void))clock

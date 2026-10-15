@@ -171,6 +171,9 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
         if(!job) {[self wakeAfter:earliest-now];return;}
         [self.queue removeObject:job.key];
         if(self.eligibleKeys && ![self.eligibleKeys containsObject:job.key]) {[self.jobs removeObjectForKey:job.key];continue;}
+        if(self.admitRequest && !self.admitRequest(job.key)) {
+            [self.jobs removeObjectForKey:job.key];XADLog("DWELL","Google start rejected by live visibility gate key=%.12s",job.key.UTF8String);continue;
+        }
         while(job.index<job.chunks.count) {
             XGTXResult *saved=self.segments[XGTXDigest(job.chunks[job.index])];
             if(!saved) break;
