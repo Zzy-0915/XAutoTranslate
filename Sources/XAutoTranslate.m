@@ -190,7 +190,7 @@ static void Tick(void) {
     [engine keepQueuedKeys:visible];[engine pump];
     if(changedKeys.count) Refresh();
 }
-static void Snapshot(void) {
+static void __attribute__((unused)) Snapshot(void) {
     NSDictionary *stats=engine.statistics;
     (void)stats;
     XADLog("SNAPSHOT","provider=GoogleGTX tracked=%lu bindings=%lu cache=%lu hits=%lu requests=%lu joined=%lu active=%lu queued=%lu throttles=%lu cooldown=%.1f",
