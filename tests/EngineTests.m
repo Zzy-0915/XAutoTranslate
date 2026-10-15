@@ -195,12 +195,13 @@ int main(void) {@autoreleasepool {
     XGTXResult *google=XGTXResult.new;google.text=@"你好 & <你好>";google.language=@"en";
     Check(XATNativePublish(original,helper,google,original.text)==2,@"Google result is published through native translation wrapper");
     T1PostTranslationInfo *info=[helper getInfoFor:original];T1TranslatedStatusViewModel *wrapper=info.translatedStatus;
-    Check([wrapper.text isEqual:google.text] && [wrapper.representedStatus.text isEqual:original.text],@"native wrapper shows translation while representedStatus preserves original");
+    Check([wrapper.text isEqual:google.text] && [((FixtureOriginal *)wrapper.representedStatus).text isEqual:original.text],@"native wrapper shows translation while representedStatus preserves original");
     Check(![wrapper.text containsString:@"已翻译"] && [wrapper.translation.translationSource isEqual:@"Google"],@"no custom hint in text; native provider attribution preserved");
     XGTXResult *read=XATNativeResult(original,info,original.text,@"en");
     Check([read.text isEqual:google.text] && read.nativeTranslation==wrapper.translation,@"regression: read translation object instead of unwrapping representedStatus");
     Check(XATNativePublish(original,helper,google,original.text)==1,@"native publication is idempotent");
-    info.state=0;Check(XATNativePublish(original,helper,google,original.text)==1 && info.state==0,@"native show-original choice is retained without a network request");info.state=3;
+    Check(XATNativeDisplayOverride(original,info,google,original.text,@"en",0)==1 && XATNativeDisplayOverride(original,info,google,original.text,@"en",1)==1 && XATNativeDisplayOverride(original,info,google,original.text,@"en",2)==0,@"validated native translation enables both list body and official button without duplicate auto body");
+    info.state=0;Check(XATNativePublish(original,helper,google,original.text)==1 && info.state==0 && XATNativeDisplayOverride(original,info,google,original.text,@"en",0)==0,@"native show-original choice is retained without a network request");info.state=3;
     __block NSNotification *observed=nil;
     id observer=[NSNotificationCenter.defaultCenter addObserverForName:@"FixtureStatusUpdated" object:original queue:nil usingBlock:^(NSNotification *note){observed=note;}];
     Check(XATNativeNotify(original,@"dynamic",@"animated") && [observed.userInfo[@"dynamic"] boolValue] && ![observed.userInfo[@"animated"] boolValue],@"native refresh carries required dynamic-content flag");
@@ -208,6 +209,7 @@ int main(void) {@autoreleasepool {
     Check(!XATNativeNotify(original,nil,@"animated"),@"missing native notification key fails explicitly");
     wrapper.translation.translation=original.text;
     Check(!XATNativeResult(original,info,original.text,@"en"),@"unchanged original is never accepted as translated");
+    Check(XATNativeDisplayOverride(original,info,nil,original.text,@"en",0)==0 && XATNativeDisplayOverride(original,info,nil,original.text,@"en",1)==0,@"unchanged original cannot enable translated body or hint");
     wrapper.translation.translation=google.text;wrapper.translation.destinationLanguage=@"en";
     Check(!XATNativeResult(original,info,original.text,@"en"),@"non-Chinese target is rejected");
     wrapper.translation.destinationLanguage=@"zh-CN";

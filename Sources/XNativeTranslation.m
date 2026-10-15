@@ -34,13 +34,25 @@ static XGTXResult *Result(id translation,NSString *original,NSString *language) 
 }
 XGTXResult *XATNativeResult(id model,id info,NSString *original,NSString *language) {
     @try {
-        XGTXResult *manual=(State(info)==3 || State(info)==4) ? Result(TranslationFromInfo(info),original,language) : nil;
+        XGTXResult *manual=State(info)==3 ? Result(TranslationFromInfo(info),original,language) : nil;
         return manual ?: Result(Get(model,@"grokTranslatedPost"),original,language);
     } @catch(NSException *e) {(void)e;XADLog("NATIVE","read exception=%s",e.name.UTF8String);return nil;}
 }
 BOOL XATNativeMatches(id info,NSString *text) {
     NSInteger state=State(info);
     return (state==0 || state==3 || state==4) && [Text(Get(TranslationFromInfo(info),@"translation")) isEqual:text] && [Text(Get(Get(info,@"translatedStatus"),@"text")) isEqual:text];
+}
+NSInteger XATNativeDisplayOverride(id model,id info,XGTXResult *cached,NSString *original,NSString *language,NSUInteger kind) {
+    if(XGTXChinese(language)) return -1;
+    NSInteger state=State(info);
+    if(cached && XATNativeMatches(info,cached.text)) {
+        if(kind==0) return state==3 || state==4;
+        return kind==1 ? 1 : 0;
+    }
+    XGTXResult *valid=XATNativeResult(model,info,original,language);
+    if((state==3 || state==4) && !valid && kind<2) return 0;
+    if(Get(model,@"grokTranslatedPost") && !valid && kind>=2) return 0;
+    return -1;
 }
 NSUInteger XATNativePublish(id model,id helper,XGTXResult *result,NSString *original) {
     if(!XGTXTranslationChanged(result.text,original) || ![helper respondsToSelector:@selector(getInfoFor:)] || ![helper respondsToSelector:@selector(setInfo:for:)]) return 0;

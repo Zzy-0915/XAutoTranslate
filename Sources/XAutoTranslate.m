@@ -46,6 +46,7 @@ static BOOL refreshPending,refreshing,installed;
 static unsigned attempts;
 static char sourceKey,viewKey,notifiedKey;
 static Class statusClass;
+static Ivar displayModelIvar;
 static NSUInteger bindings;
 
 static id Object(id object,NSString *name) {
@@ -228,6 +229,7 @@ static BOOL Replace(Class cls,SEL selector,IMP replacement,IMP *old) {
     return YES;
 }
 static BOOL NeverDisplay(id self,SEL selector) {(void)self;(void)selector;return NO;}
+static BOOL EnableInline(id self,SEL selector) {(void)self;(void)selector;return YES;}
 static void BlockOfficialTranslation(id self,SEL selector,id event,id controller) {
     id view=Object(event,@"statusView"),model=Object(view,@"viewModel");
     XATSource *source=ViewSource(view);XGTXResult *saved=source ? [engine cached:source.key] : nil;
@@ -290,6 +292,27 @@ static void Install(void) {
     NSUInteger blocked=0;
     for(NSString *method in @[@"isGrokPostAutoTranslationEnabled"])
         blocked+=Replace(access,NSSelectorFromString(method),(IMP)NeverDisplay,NULL);
+    Replace(access,NSSelectorFromString(@"isGrokPostInlineTranslationEnabled"),(IMP)EnableInline,NULL);
+    Class displayHelper=NSClassFromString(@"T1GrokPostTranslationDisplayHelper");
+    displayModelIvar=class_getInstanceVariable(displayHelper,"statusViewModel");
+    NSUInteger displayHooks=0;
+    NSArray<NSString *> *displayMethods=@[@"shouldDisplayManualTranslateText",@"shouldDisplayManualTranslateButton",@"shouldDisplayAutoTranslateText",@"shouldDisplayAutoTranslateButton"];
+    if(displayModelIvar) for(NSUInteger kind=0;kind<displayMethods.count;kind++) {
+        SEL selector=NSSelectorFromString(displayMethods[kind]);Method method=class_getInstanceMethod(displayHelper,selector);if(!method) continue;
+        IMP original=method_getImplementation(method);
+        IMP hook=imp_implementationWithBlock(^BOOL(id helper){
+            id model=object_getIvar(helper,displayModelIvar);XATSource *source=Source(Status(model));
+            if(source && [translationHelper respondsToSelector:NSSelectorFromString(@"getInfoFor:")]) {
+                id info=((id (*)(id,SEL,id))objc_msgSend)(translationHelper,NSSelectorFromString(@"getInfoFor:"),model);
+                NSInteger decision=XATNativeDisplayOverride(model,info,[engine cached:source.key],source.text,source.language,kind);
+                if(decision>=0) return decision!=0;
+            }
+            return ((BOOL (*)(id,SEL))original)(helper,selector);
+        });
+        displayHooks+=Replace(displayHelper,selector,hook,NULL);
+    }
+    (void)displayHooks;
+    XADLog("INSTALL","native display gates=%lu/4 inline=enabled modelIvar=%d",(unsigned long)displayHooks,displayModelIvar!=NULL);
     blocked+=Replace(NSClassFromString(@"T1GrokTranslateEventHandler"),NSSelectorFromString(@"handleStatusViewEvent:controller:"),(IMP)BlockOfficialTranslation,(IMP *)&originalOfficial);
     (void)blocked;(void)count;
     XADLog("OFFICIAL","managed translation gates installed=%lu/2 helper=%d event=%d",(unsigned long)blocked,translationHelper!=nil,eventType!=nil);
