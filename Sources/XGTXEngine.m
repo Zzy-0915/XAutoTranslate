@@ -88,6 +88,15 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
 - (XGTXResult *)cached:(NSString *)key {
     [self.lock lock];XGTXResult *result=self.success[key];if(result) self.hits++;[self.lock unlock];return result;
 }
+- (void)storeSuccess:(NSString *)key text:(NSString *)text language:(NSString *)language {
+    NSAssert(NSThread.isMainThread,@"main-thread scheduler");
+    if(!text.length) return;
+    XGTXResult *result=XGTXResult.new;result.text=text;result.language=language;
+    [self.lock lock];BOOL fresh=self.success[key]==nil;
+    if(fresh) self.success[key]=result;
+    [self.lock unlock];
+    if(fresh && self.didFinish) self.didFinish(key);
+}
 - (void)enqueue:(NSString *)key text:(NSString *)text language:(NSString *)language {
     NSAssert(NSThread.isMainThread,@"main-thread scheduler");
     if(self.invalidated || !text.length || XGTXChinese(language) || [self cached:key]) return;
@@ -117,11 +126,9 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
     }
 }
 - (void)complete:(XGTXJob *)job {
-    XGTXResult *result=XGTXResult.new;result.text=[job.parts componentsJoinedByString:@""];result.language=job.language;
-    [self.lock lock];self.success[job.key]=result;[self.lock unlock];
+    [self storeSuccess:job.key text:[job.parts componentsJoinedByString:@""] language:job.language];
     [self.jobs removeObjectForKey:job.key];[self.failedUntil removeObjectForKey:job.key];
     XADLog("GTX","success key=%.12s chunks=%lu cacheEntries=%lu",job.key.UTF8String,(unsigned long)job.chunks.count,(unsigned long)self.success.count);
-    if(self.didFinish) self.didFinish(job.key);
 }
 - (void)pump {
     NSAssert(NSThread.isMainThread,@"main-thread scheduler");

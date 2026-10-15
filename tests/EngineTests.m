@@ -2,6 +2,7 @@
 #import <objc/message.h>
 #import "XGTXEngine.h"
 #import "XGTXNativeDisplay.h"
+#import "XTranslationRouter.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -116,11 +117,49 @@ int main(void) {@autoreleasepool {
     Check(![bad cached:@"bad"],@"failed reply never poisons success cache");now=506;[bad pump];
     Check(Wait(^BOOL{return [bad cached:@"bad"]!=nil;}),@"failed request can retry and cache success");[bad invalidate];
 
+    now=1000;XGTXEngine *dual=Engine(^NSTimeInterval{return now;},0);
+    __block NSUInteger officialStarts=0,dualFinishes=0;
+    XTranslationRouter *router=[[XTranslationRouter alloc] initWithEngine:dual clock:^NSTimeInterval{return now;}
+        start:^BOOL(id context){(void)context;officialStarts++;return YES;}
+        inspect:^XOfficialObservation *(id context){return context;}];
+    router.didFinish=^(NSString *key){(void)key;dualFinishes++;};
+    XOfficialObservation *first=XOfficialObservation.new;
+    [router submit:@"official" text:@"OfficialOnly" language:@"en" context:first];
+    for(NSUInteger i=0;i<100;i++) [router submit:@"official" text:@"OfficialOnly" language:@"en" context:first];
+    [router tickWithVisibleKeys:[NSSet setWithObject:@"official"]];Check(officialStarts==1,@"official duplicate triggers coalesce");
+    XGTXResult *officialText=XGTXResult.new;officialText.text=@"官方译文";officialText.language=@"en";first.result=officialText;
+    now=1001;[router tickWithVisibleKeys:[NSSet setWithObject:@"official"]];
+    Check([[dual cached:@"official"].text isEqual:@"官方译文"] && Count(@"OfficialOnly")==0 && dualFinishes==1,@"official success enters shared cache without Google");
+    XOfficialObservation *fail=XOfficialObservation.new;fail.failed=YES;fail.code=60;
+    [router submit:@"fallback" text:@"DualFallback" language:@"en" context:fail];
+    [router tickWithVisibleKeys:[NSSet setWithObject:@"fallback"]];
+    Check(Wait(^BOOL{return [dual cached:@"fallback"]!=nil;}),@"native failure automatically falls back to GTX");
+    Check(officialStarts==1 && Count(@"DualFallback")==1,@"failed native state is not retried");
+    XOfficialObservation *later=XOfficialObservation.new;
+    [router submit:@"during-open" text:@"DuringOpen" language:@"en" context:later];
+    [router tickWithVisibleKeys:[NSSet setWithObject:@"during-open"]];
+    Check(Wait(^BOOL{return [dual cached:@"during-open"]!=nil;}),@"new content goes directly to Google during official cooldown");
+    Check(officialStarts==1,@"official circuit suppresses repeated failing requests");
+    now=1302;
+    [router submit:@"probe" text:@"OfficialProbe" language:@"en" context:later];
+    XOfficialObservation *second=XOfficialObservation.new;
+    [router submit:@"probe-queued" text:@"ProbeQueued" language:@"en" context:second];
+    NSSet *both=[NSSet setWithArray:@[@"probe",@"probe-queued"]];
+    [router tickWithVisibleKeys:both];Check(officialStarts==2,@"cooldown recovery starts one probe");
+    now=1304;[router tickWithVisibleKeys:both];Check(officialStarts==2,@"half-open circuit allows only one pending probe");
+    later.result=officialText;[router tickWithVisibleKeys:both];Check(officialStarts==3,@"successful probe restores official priority");
+    now=1313;[router tickWithVisibleKeys:both];
+    Check(Wait(^BOOL{return [dual cached:@"probe-queued"]!=nil;}),@"8s official timeout falls back automatically");
+    NSUInteger requestsBefore=[dual.statistics[@"requests"] unsignedIntegerValue];
+    for(NSUInteger i=0;i<1000;i++) [router submit:@"fallback" text:@"DualFallback" language:@"en" context:fail];
+    Check([dual.statistics[@"requests"] unsignedIntegerValue]==requestsBefore && officialStarts==3,@"shared successful cache prevents requests on both providers");
+    [dual invalidate];
+
     TFNTwitterStatus *status=TFNTwitterStatus.new;status.statusID=123;status.fromUserID=456;status.date=NSDate.date;
     NSDictionary *display=XGTXNativeDisplay(status,@"A&B <C>",@"en",42,Factory);
     Check([display[@"text"] hasPrefix:@"英语 已翻译\n\n"],@"language status is in native text flow");
     Check([display[@"text"] hasSuffix:@"A&amp;B &lt;C&gt;"] && [display[@"options"] unsignedIntegerValue]==42 && factoryCalls==1,@"native constructor, escaping and original sizing options preserved");
     Check(XGTXNativeDisplay(nil,@"x",@"en",0,Factory)==nil,@"missing source does not create an overlay");
-    puts("PASS: parser, Unicode chunks, Chinese exclusion, in-flight coalescing, 1000 cache revisits, shared segments, concurrency, HTTP429 Retry-After, error recovery, native text model/status/escaping");
+    puts("PASS: parser, Unicode, Chinese exclusion, coalescing, 1000 cache revisits, concurrency, HTTP429 Retry-After, official success, automatic Google fallback, circuit cooldown/probe/recovery, timeout, shared cache, native text model/status/escaping");
     return 0;
 }}

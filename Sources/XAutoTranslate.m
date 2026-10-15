@@ -5,15 +5,18 @@
 #import <objc/message.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <dlfcn.h>
 #include "XDiagnostics.h"
 #import "XGTXEngine.h"
 #import "XGTXNativeDisplay.h"
+#import "XTranslationRouter.h"
 
 // Verified selectors in the supplied X 12.33 (31) binary; native factory keeps
 // glyph layout, max-lines, width measurements and the cell's normal height path.
 @interface NSObject (XATNativeTextFactory)
 - (instancetype)initWithStatusID:(long long)statusID cardData:(id)card originalText:(NSString *)text fromUserID:(long long)userID date:(NSDate *)date;
 - (instancetype)initWithCanonicalStatus:(id)canonical fromUser:(id)user;
+- (instancetype)initWithEventType:(id)type statusView:(id)view sourceView:(id)source;
 @end
 
 @interface XATSource : NSObject
@@ -23,8 +26,19 @@
 @end
 @implementation XATSource
 @end
+@interface XATNativeContext : NSObject
+@property(nonatomic,weak) UIView *view;
+@property(nonatomic,strong) id model;
+@end
+@implementation XATNativeContext
+@end
 
 static XGTXEngine *engine;
+static XTranslationRouter *router;
+static id translationHelper,eventType;
+static id (*currentLanguage)(void);
+static _Thread_local unsigned routingOfficial;
+static void (*originalOfficial)(id,SEL,id,id);
 static NSCache<NSString *,id> *nativeModels;
 static NSHashTable<UIView *> *views;
 static NSTimer *scanTimer;
@@ -47,6 +61,7 @@ static id Object(id object,NSString *name) {
 static long long Number(id object,NSString *name) {
     SEL selector=NSSelectorFromString(name);
     NSMethodSignature *sig=[object methodSignatureForSelector:selector];
+    if(sig.numberOfArguments==2 && (sig.methodReturnType[0]=='i' || sig.methodReturnType[0]=='I')) return ((int (*)(id,SEL))objc_msgSend)(object,selector);
     if(sig.numberOfArguments!=2 || (sig.methodReturnType[0]!='q' && sig.methodReturnType[0]!='Q')) return 0;
     return ((long long (*)(id,SEL))objc_msgSend)(object,selector);
 }
@@ -119,6 +134,43 @@ static BOOL Visible(UIView *view) {
 static XATSource *ViewSource(UIView *view) {
     return Source(Status(Object(view,@"viewModel")));
 }
+static BOOL StartOfficial(XATNativeContext *context) {
+    UIView *view=context.view;
+    id handler=Object(view,@"eventHandler");SEL handle=NSSelectorFromString(@"handleStatusViewEvent:");
+    Class eventClass=NSClassFromString(@"TTACoreStatusViewEvent");
+    if(!originalOfficial || !view.window || Object(view,@"viewModel")!=context.model || !Object(view,@"account") || ![handler respondsToSelector:handle] || !eventType || !class_getInstanceMethod(eventClass,@selector(initWithEventType:statusView:sourceView:))) return NO;
+    @try {
+        id event=[[eventClass alloc] initWithEventType:eventType statusView:view sourceView:view];
+        if(!event) return NO;
+        routingOfficial++;
+        @try {((void (*)(id,SEL,id))objc_msgSend)(handler,handle,event);}
+        @finally {routingOfficial--;}
+        return YES;
+    } @catch(NSException *e) {(void)e;XADLog("OFFICIAL","dispatch exception=%s",e.name.UTF8String);return NO;}
+}
+static XOfficialObservation *InspectOfficial(XATNativeContext *context) {
+    XOfficialObservation *observation=XOfficialObservation.new;
+    if(currentLanguage && !XGTXChinese(String(currentLanguage()) ?: @"und")) {observation.failed=YES;return observation;}
+    SEL getInfo=NSSelectorFromString(@"getInfoFor:");
+    if(![translationHelper respondsToSelector:getInfo]) {observation.failed=YES;return observation;}
+    @try {
+        id info=((id (*)(id,SEL,id))objc_msgSend)(translationHelper,getInfo,context.model);
+        NSInteger state=Number(info,@"state");
+        id automatic=Object(context.model,@"grokTranslatedPost");
+        NSString *text=String(Object(automatic,@"translation"));
+        if(!text.length && state==3) {
+            id translated=Object(info,@"translatedStatus");
+            readingOriginal++;
+            @try {text=String(Object(translated,@"fullText")) ?: String(Object(translated,@"text"));}
+            @finally {readingOriginal--;}
+        }
+        if(text.length) {XGTXResult *result=XGTXResult.new;result.text=text;result.language=@"und";observation.result=result;}
+        observation.failed=!text.length && (state==2 || state==3);
+        observation.inFlight=state==1 || state==4;
+        observation.code=Number(Object(info,@"translationError"),@"code");
+    } @catch(NSException *e) {(void)e;observation.failed=YES;XADLog("OFFICIAL","observe exception=%s",e.name.UTF8String);}
+    return observation;
+}
 static void Track(UIView *view) {
     if(!NSThread.isMainThread) return;
     [views addObject:view];
@@ -130,7 +182,8 @@ static void Track(UIView *view) {
         objc_setAssociatedObject(view,&viewKey,source.key,OBJC_ASSOCIATION_COPY_NONATOMIC);
         XADLog("VIEW","visible key=%.12s class=%s lang=%s",source.key.UTF8String,NSStringFromClass(view.class).UTF8String,source.language.UTF8String);
     }
-    [engine enqueue:source.key text:source.text language:source.language];
+    XATNativeContext *context=XATNativeContext.new;context.view=view;context.model=Object(view,@"viewModel");
+    [router submit:source.key text:source.text language:source.language context:context];
 }
 static UITableView *Table(UIView *view) {
     for(UIView *parent=view.superview;parent;parent=parent.superview) if([parent isKindOfClass:UITableView.class]) return (id)parent;
@@ -187,13 +240,17 @@ static void Tick(void) {
     for(UIView *view in views.allObjects) if(Visible(view)) {
         Track(view);XATSource *source=ViewSource(view);if(source) [visible addObject:source.key];
     }
-    [engine keepQueuedKeys:visible];[engine pump];
+    [router tickWithVisibleKeys:visible];
     if(changedKeys.count) Refresh();
 }
 static void __attribute__((unused)) Snapshot(void) {
     NSDictionary *stats=engine.statistics;
     (void)stats;
-    XADLog("SNAPSHOT","provider=GoogleGTX tracked=%lu bindings=%lu cache=%lu hits=%lu requests=%lu joined=%lu active=%lu queued=%lu throttles=%lu cooldown=%.1f",
+    NSDictionary *routes=router.statistics;(void)routes;
+    XADLog("ROUTER","officialStarts=%lu officialSuccesses=%lu fallbacks=%lu officialCooldown=%.1f pending=%lu",
+        (unsigned long)[routes[@"officialStarts"] unsignedIntegerValue],(unsigned long)[routes[@"officialSuccesses"] unsignedIntegerValue],
+        (unsigned long)[routes[@"fallbacks"] unsignedIntegerValue],[routes[@"officialCooldown"] doubleValue],(unsigned long)[routes[@"officialPending"] unsignedIntegerValue]);
+    XADLog("SNAPSHOT","provider=OfficialFirst+GoogleGTX tracked=%lu bindings=%lu cache=%lu hits=%lu googleRequests=%lu joined=%lu active=%lu queued=%lu throttles=%lu cooldown=%.1f",
         (unsigned long)views.allObjects.count,(unsigned long)bindings,(unsigned long)[stats[@"cache"] unsignedIntegerValue],
         (unsigned long)[stats[@"hits"] unsignedIntegerValue],(unsigned long)[stats[@"requests"] unsignedIntegerValue],(unsigned long)[stats[@"joined"] unsignedIntegerValue],
         (unsigned long)[stats[@"active"] unsignedIntegerValue],(unsigned long)[stats[@"queued"] unsignedIntegerValue],(unsigned long)[stats[@"throttles"] unsignedIntegerValue],[stats[@"cooldown"] doubleValue]);
@@ -206,8 +263,8 @@ static BOOL Replace(Class cls,SEL selector,IMP replacement,IMP *old) {
 }
 static BOOL NeverDisplay(id self,SEL selector) {(void)self;(void)selector;return NO;}
 static void BlockOfficialTranslation(id self,SEL selector,id event,id controller) {
-    (void)self;(void)selector;(void)event;(void)controller;
-    XADLog("OFFICIAL","native translation event blocked; provider=GoogleGTX");
+    if(routingOfficial && originalOfficial) {originalOfficial(self,selector,event,controller);return;}
+    XADLog("OFFICIAL","unmanaged native translation event suppressed; use router");
 }
 static void Install(void);
 static void Retry(void) { if(attempts<20) dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(),^{Install();}); }
@@ -226,7 +283,15 @@ static void Install(void) {
     }
     nativeModels=NSCache.new;nativeModels.countLimit=256;views=NSHashTable.weakObjectsHashTable;changedKeys=NSMutableSet.new;
     engine=[[XGTXEngine alloc] initWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration clock:^NSTimeInterval{return NSDate.timeIntervalSinceReferenceDate;} interval:1.0];
-    engine.didFinish=^(NSString *key){
+    Class helperClass=NSClassFromString(@"T1PostTranslationHelper");
+    translationHelper=Object(helperClass,@"shared");
+    currentLanguage=dlsym(RTLD_DEFAULT,"TFSCurrentLanguageCode");
+    void *eventAddress=dlsym(RTLD_DEFAULT,"T1StatusViewGrokTranslateEvent");
+    if(eventAddress) eventType=*(__unsafe_unretained id *)eventAddress;
+    router=[[XTranslationRouter alloc] initWithEngine:engine clock:^NSTimeInterval{return NSDate.timeIntervalSinceReferenceDate;}
+        start:^BOOL(id context){return StartOfficial(context);}
+        inspect:^XOfficialObservation *(id context){return InspectOfficial(context);}];
+    router.didFinish=^(NSString *key){
         [changedKeys addObject:key];
         if(!refreshPending) {refreshPending=YES;dispatch_async(dispatch_get_main_queue(),^{Refresh();});}
     };
@@ -254,18 +319,18 @@ static void Install(void) {
         Replace(helper,NSSelectorFromString(method),(IMP)NeverDisplay,NULL);
     Class access=NSClassFromString(@"_TtC4Grok17GrokFeatureAccess");
     NSUInteger blocked=0;
-    for(NSString *method in @[@"isGrokPostTranslationEnabled",@"isGrokPostAutoTranslationEnabled",@"isGrokPostInlineTranslationEnabled"])
+    for(NSString *method in @[@"isGrokPostAutoTranslationEnabled"])
         blocked+=Replace(access,NSSelectorFromString(method),(IMP)NeverDisplay,NULL);
-    blocked+=Replace(NSClassFromString(@"T1GrokTranslateEventHandler"),NSSelectorFromString(@"handleStatusViewEvent:controller:"),(IMP)BlockOfficialTranslation,NULL);
+    blocked+=Replace(NSClassFromString(@"T1GrokTranslateEventHandler"),NSSelectorFromString(@"handleStatusViewEvent:controller:"),(IMP)BlockOfficialTranslation,(IMP *)&originalOfficial);
     (void)blocked;(void)count;
-    XADLog("OFFICIAL","native translation gates blocked=%lu/4",(unsigned long)blocked);
+    XADLog("OFFICIAL","managed translation gates installed=%lu/2 helper=%d event=%d",(unsigned long)blocked,translationHelper!=nil,eventType!=nil);
     scanTimer=[NSTimer timerWithTimeInterval:0.75 repeats:YES block:^(NSTimer *timer){(void)timer;Tick();}];
     [NSRunLoop.mainRunLoop addTimer:scanTimer forMode:NSRunLoopCommonModes];
     [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidReceiveMemoryWarningNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note){
         (void)note;[nativeModels removeAllObjects];XADLog("MEMORY","native render models cleared; successful translations retained");
     }];
     XADSetSnapshotHandler(Snapshot);installed=YES;
-    XADCoreStatus("Google GTX 已启用；中文跳过；成功译文在本次运行内缓存");
+    XADCoreStatus("官方优先，失败自动转 Google；中文跳过；成功结果缓存");
     XADLog("INSTALL","GTX hooks=%lu nativeDisplay=1 footer=language-translated overlay=0 interval=1s concurrent=2",(unsigned long)count);
 }
 static atomic_bool scheduled;
@@ -274,5 +339,5 @@ void XATScheduleInitialization(void) {
     dispatch_async(dispatch_get_main_queue(),^{Install();});
 }
 __attribute__((constructor)) static void start(void) {
-    XADBootstrap("CONSTRUCTOR_ENTER");XADLog("BOOT","XAutoTranslate v5 GoogleGTX loaded");XATScheduleInitialization();
+    XADBootstrap("CONSTRUCTOR_ENTER");XADLog("BOOT","XAutoTranslate v6 OfficialFirst + GoogleGTX loaded");XATScheduleInitialization();
 }

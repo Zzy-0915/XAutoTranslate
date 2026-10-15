@@ -18,6 +18,7 @@ FOUNDATION_EXPORT NSArray<NSString *> *XGTXChunks(NSString *text);
                                 clock:(NSTimeInterval (^)(void))clock
                              interval:(NSTimeInterval)interval;
 - (nullable XGTXResult *)cached:(NSString *)key;
+- (void)storeSuccess:(NSString *)key text:(NSString *)text language:(NSString *)language;
 - (void)enqueue:(NSString *)key text:(NSString *)text language:(NSString *)language;
 - (void)keepQueuedKeys:(NSSet<NSString *> *)visibleKeys;
 - (void)pump;
