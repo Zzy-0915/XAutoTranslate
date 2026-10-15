@@ -1,35 +1,21 @@
-# XAutoTranslate v4 · Apple SDK 构建版
+# XAutoTranslate v5 · Google GTX
 
-目标为 X 12.33（31）、iOS 17.2.1、arm64，供 JailFools 注入。中文跳过，非中文帖子/评论通过 X 自身的翻译事件与语言设置路径处理。真实覆盖范围与请求成功情况需设备验证，不能保证所有语种或评论均已修复。
+面向 X 12.33（31）、iOS 17.2 及以上的 arm64 注入 dylib。使用 Apple iPhoneOS SDK 编译并进行 ad-hoc 签名。安装时先移除旧版 XAutoTranslate，避免同时加载多个版本，再通过 JailFools 注入本次 dylib，彻底退出 X 后重启。
 
-## 构建
+## 翻译
 
-Actions 的 **Build XAutoTranslate with Apple SDK** 在 macOS 上使用 Xcode/iPhoneOS SDK 编译、codesign 签名并核验 dylib，产物在对应运行的 Artifacts 中。根目录不再保留另一份不参与构建的 Tweak.x，workflow 也不再内嵌生成另外的源码。
+可见推文、评论及引用内容使用 HTTPS `translate.googleapis.com/translate_a/single`（client=gtx、sl=auto、tl=zh-CN）获取中文译文。中文跳过。原文会发送给 Google；不向 Google 发送 X 的登录令牌、Cookie 或账号信息。插件不调用 X 的官方翻译服务，并关闭 X 12.33 已核对的三项 Grok 帖子翻译功能开关、翻译事件处理入口和原生翻译显示开关。
 
-本地需 Mac + Xcode，执行 `make` 或 `bash scripts/build-ios.sh`。产物为 `output/XAutoTranslate-v4.dylib`，附带 `build-info.txt`（提交 SHA、Xcode/SDK/Clang 版本及文件 SHA-256）。不会生成 deb。
+译文使用 X 自身的文本模型及高度测量，首行显示“语种 已翻译”，正文继续使用原生折叠/展开及列表布局，不添加覆盖正文的译文浮层。原始推文模型保持原文。具体设备上的重排效果仍需实机验证。
 
-## 安装与日志按钮
+成功结果在进程内保留，缓存键包含推文 ID、原文和目标语言；来回滚动不会对已缓存结果再次请求。相同请求合并，相同分段可复用。退出进程后缓存清空。渲染模型可清理，成功译文缓存保留；长期使用的内存占用随成功翻译文本增长。缓存命中无网络等待，但不承诺渲染耗时严格为 0ms。
 
-1. 在 JailFools 的 X 条目中移除先前注入的本插件旧版，不必卸载 X 或移除无关插件。
-2. 注入 **XAutoTranslate-v4.dylib**，完全退出并重开 X。不要同时加载多个版本。
-3. 点击屏幕右侧中部的蓝色 **日志** 按钮，打开 **实时日志 / 导出日志**。没有双指长按入口。
-4. 复现未翻译的帖子和评论后导出日志；关闭面板后仍持续记录，不会自动上传。
+GTX 是未提供免限流承诺的公开接口，仍可能返回 HTTP 429 或不可用。最多同时两条请求，每秒启动至多一条；离屏待处理项目移出队列，长文本分段，失败不写入成功缓存。429/503 采用全局退避并遵守 Retry-After，其他错误有限重试。不能保证所有语言都被 Google 支持，也不能保证接口永远可达。当前版本没有回退到官方翻译的路径。
 
-按钮和文件日志都需要动态库实际加载。C 构造函数与原生 Objective-C `+load` 均调用一个原子保护的初始化入口，只安装一次。`OBJC_LOAD_ENTER` 和 `CONSTRUCTOR_ENTER` 引导阶段帮助判断加载是否到达代码；新增 ObjC 入口并不证明之前失败的根因就是构造函数。
+## 临时日志
 
-引导日志按进程 HOME/CFFIXED_USER_HOME/TMPDIR 尝试写入 X 数据容器根目录、Documents、tmp 下的 `XAutoTranslate-bootstrap.log`，构建标记为 `v4`。常规文件为 `Library/Caches/XAutoTranslate/current.log`；路径可能因环境与写权限不同而失败。没有按钮或新记录时，仍需核对注入器列表、实际 dylib 文件和设备系统日志。
+屏幕上的“日志”按钮打开面板，包含实时日志和导出日志。记录加载、挂钩、官方入口屏蔽数量、请求状态、缓存命中、队列、退避及错误代码；不记录推文正文、完整请求 URL、响应正文或账号令牌。导出日志可用于排查实际设备问题。编译时 `XAD_DIAGNOSTICS=0` 移除诊断界面和文件写入。
 
-## 源码
+## 构建与验证
 
-- `Sources/XAutoTranslate.c`：原生翻译路径、去重/限量观察和诊断事件；不额外请求第三方翻译服务。
-- `Sources/XDiagnostics.c/h`：可移除的日志按钮、面板、导出和引导日志。
-- `Sources/AppleBootstrap.m`：标准 Apple ObjC SDK 编译的 `+load` 入口。
-- `scripts/build-ios.sh`、`scripts/verify-dylib.py`：唯一构建路径及产物结构/签名检查。
-
-日志包含加载、Hook、语言、翻译触发/跳过、请求/缓存状态与原生显示条件。不记录帖子/译文正文、账号标识、Cookie 或令牌。原生操作结束不等于服务器保存成功，译文缓存状态不等于屏幕已显示。内存上限 512 KiB，常规文件上限 2 MiB，保留一个前段/前次文件；引导文件约 128 KiB 上限。
-
-临时诊断可用 `XAD_DIAGNOSTICS=0 make` 编译关闭；Actions 同时检查该配置。问题全部解决后应删除诊断模块与核心诊断调用，恢复精简最终源码。
-
-## 验证边界
-
-构建通过只证明 Apple 工具链能够生成、签名并核验文件，不等于 JailFools 已加载，更不等于在 iPhone 上验证了所有翻译行为。真实设备上仍需根据日志继续定位。
+运行 `bash scripts/build-ios.sh`，产物在 `output/`。GitHub Actions 先使用本地 NSURLProtocol 假服务器验证 Unicode、缓存、重复合并、并发上限、429 退避、错误重试及原生文本工厂，再分别构建带日志和无日志版本。测试不请求真实 Google 服务。原生文本工厂测试使用模拟类，不等于手机 UI 实测。构建检查 arm64、安装名、初始化入口及签名页哈希。`build-info.txt` 记录提交与工具链及产物 SHA-256。

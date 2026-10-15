@@ -13,7 +13,12 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - name: Test GTX cache, scheduling and native text factory
+        run: |
+          mkdir -p build
+          xcrun --sdk macosx clang -fobjc-arc -fobjc-exceptions -fblocks -Wall -Wextra -Werror -ISources tests/EngineTests.m Sources/XGTXEngine.m Sources/XGTXNativeDisplay.m -framework Foundation -o build/engine-tests
+          build/engine-tests
       - name: Compile and sign with iPhoneOS SDK
         run: bash scripts/build-ios.sh
       - name: Check build without temporary diagnostics
@@ -22,11 +27,11 @@ jobs:
           XAD_OUTPUT_DIR: build/no-diagnostics
         run: bash scripts/build-ios.sh
       - name: Upload verified dylib
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
-          name: XAutoTranslate-v4-X12.33-${{ github.run_number }}
+          name: XAutoTranslate-v5-X12.33-${{ github.run_number }}
           path: |
-            output/XAutoTranslate-v4.dylib
+            output/XAutoTranslate-v5.dylib
             output/build-info.txt
             output/README.md
           if-no-files-found: error

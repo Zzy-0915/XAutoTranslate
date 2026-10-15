@@ -103,7 +103,7 @@ void XADBootstrap(const char *stage) {
     char path[4096],line[1024];
     struct XADTimeval tv={0};
     gettimeofday(&tv,0);
-    int count=snprintf(line,sizeof(line),"epoch=%ld.%03d pid=%d build=v4 stage=%s\n",tv.seconds,tv.microseconds/1000,getpid(),stage ? stage : "unknown");
+    int count=snprintf(line,sizeof(line),"epoch=%ld.%03d pid=%d build=v5 stage=%s\n",tv.seconds,tv.microseconds/1000,getpid(),stage ? stage : "unknown");
     unsigned long length=count>0 ? (unsigned long)count : 0;
     if(length>=sizeof(line)) length=sizeof(line)-1;
     for(unsigned i=0;i<2;i++) {
@@ -303,7 +303,7 @@ static void exportLog(id self, SEL command, id sender) {
     char *copy = snapshot();
     XADFile *out = copy ? fopen(exportPath,"wb") : 0;
     if (!out) { free(copy); XADLog("export","ERROR cannot create exported log file"); updatePanel(); return; }
-    const char *header = "XAutoTranslate temporary diagnostics v4\nUTC timestamps; no post bodies, account identifiers or request headers recorded.\nStartup is preserved separately (first 64 KiB); current disk segment is at most 2 MiB.\nRepeated startup entries in the current segment are intentional.\n\n--- STARTUP ---\n";
+    const char *header = "XAutoTranslate temporary diagnostics v5\nUTC timestamps; no post bodies, account identifiers or request headers recorded.\nStartup is preserved separately (first 64 KiB); current disk segment is at most 2 MiB.\nRepeated startup entries in the current segment are intentional.\n\n--- STARTUP ---\n";
     unsigned long headerLength = strlen(header), copyLength = strlen(copy);
     bool success = fwrite(header,1,headerLength,out) == headerLength;
     lockLog();
@@ -413,7 +413,7 @@ static void installWindow(id window) {
         id font=((id (*)(id,SEL,double))objc_msgSend)(objc_getClass("UIFont"),S("boldSystemFontOfSize:"),14.0);
         V1(M0(button,"titleLabel"),"setFont:",font);
         V1(button,"setAccessibilityLabel:",string("打开 X 翻译诊断日志"));
-        V1(button,"setAccessibilityIdentifier:",string("XAutoTranslate.LogButton.v4"));
+        V1(button,"setAccessibilityIdentifier:",string("XAutoTranslate.LogButton.v5"));
         SETLONG(button,"setAutoresizingMask:",1UL|8UL|32UL);
         id layer=M0(button,"layer");
         ((void (*)(id,SEL,double))objc_msgSend)(layer,S("setCornerRadius:"),22.0);
