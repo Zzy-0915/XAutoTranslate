@@ -7,6 +7,7 @@
 - (instancetype)initWithTranslation:(id)translation forUnderlyingViewModel:(id)model;
 - (instancetype)initWithURLs:(id)urls mentions:(id)mentions hashtags:(id)hashtags symbols:(id)symbols timestamps:(id)timestamps;
 - (id)getInfoFor:(id)model;
+- (id)getOrCreateInfoFor:(id)model;
 - (void)setInfo:(id)info for:(id)model;
 - (void)setOriginalStatus:(id)model;
 - (void)setTranslatedStatus:(id)model;
@@ -59,7 +60,7 @@ NSUInteger XATNativePublish(id model,id helper,XGTXResult *result,NSString *orig
     @try {
         if(XATNativeMatches([helper getInfoFor:model],result.text)) return 1;
         Class translationClass=NSClassFromString(@"TFSTwitterTranslation");
-        Class wrapperClass=NSClassFromString(@"T1TranslatedStatusViewModel"),infoClass=NSClassFromString(@"T1PostTranslationInfo");
+        Class wrapperClass=NSClassFromString(@"T1TranslatedStatusViewModel");
         if(!class_getInstanceMethod(translationClass,@selector(initWithTranslation:previewTranslation:entities:translationSource:localizedSourceLanguage:sourceLanguage:destinationLanguage:polls:translationState:)) || !class_getInstanceMethod(wrapperClass,@selector(initWithTranslation:forUnderlyingViewModel:))) return 0;
         id translation=result.nativeTranslation;
         if(![Text(Get(translation,@"translation")) isEqual:result.text] || !XGTXChinese(Text(Get(translation,@"destinationLanguage")))) {
@@ -75,7 +76,9 @@ NSUInteger XATNativePublish(id model,id helper,XGTXResult *result,NSString *orig
         id wrapper=[[wrapperClass alloc] initWithTranslation:translation forUnderlyingViewModel:model];
         // Verify the exact getter consumed by native text layout, before publishing success.
         if(![Text(Get(wrapper,@"text")) isEqual:result.text]) return 0;
-        id info=[infoClass new];
+        // T1PostTranslationInfo.init traps in X 12.33. Only X's factory may create it.
+        if(![helper respondsToSelector:@selector(getOrCreateInfoFor:)]) return 0;
+        id info=[helper getOrCreateInfoFor:model];
         if(![info respondsToSelector:@selector(setState:)] || ![info respondsToSelector:@selector(setOriginalStatus:)] || ![info respondsToSelector:@selector(setTranslatedStatus:)] || ![info respondsToSelector:@selector(setTranslationError:)]) return 0;
         [info setOriginalStatus:model];[info setTranslatedStatus:wrapper];[info setTranslationError:nil];[info setState:3];
         [helper setInfo:info for:model];

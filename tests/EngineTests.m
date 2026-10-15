@@ -3,6 +3,7 @@
 #import "XGTXEngine.h"
 #import "XNativeTranslation.h"
 #import "XTranslationRouter.h"
+#import "XDwellGate.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -92,17 +93,23 @@ static BOOL brokenWrapper;
 @interface T1PostTranslationInfo : NSObject
 @property(nonatomic) NSInteger state;
 @property(nonatomic,strong) id originalStatus,translatedStatus,translationError;
+- (instancetype)initWithFixtureModel:(id)model;
 @end
+static NSUInteger forbiddenInfoInitializers,factoryCalls;
 @implementation T1PostTranslationInfo
+- (instancetype)init {forbiddenInfoInitializers++;[NSException raise:@"UnavailableNativeInitializer" format:@"X 12.33 default init is not supported"];return nil;}
+- (instancetype)initWithFixtureModel:(id)model {if((self=[super init])) {_originalStatus=model;_state=0;}return self;}
 @end
 @interface FixtureHelper : NSObject
 @property(nonatomic,strong) NSMapTable *infos;
 - (id)getInfoFor:(id)model;
+- (id)getOrCreateInfoFor:(id)model;
 - (void)setInfo:(id)info for:(id)model;
 @end
 @implementation FixtureHelper
 - (instancetype)init {if((self=[super init])) _infos=NSMapTable.strongToStrongObjectsMapTable;return self;}
 - (id)getInfoFor:(id)model {return [self.infos objectForKey:model];}
+- (id)getOrCreateInfoFor:(id)model {factoryCalls++;id info=[self getInfoFor:model];if(!info) {info=[[T1PostTranslationInfo alloc] initWithFixtureModel:model];[self setInfo:info for:model];}return info;}
 - (void)setInfo:(id)info for:(id)model {[self.infos setObject:info forKey:model];}
 @end
 @interface T1TranslationProvider : NSObject
@@ -137,7 +144,7 @@ int main(void) {@autoreleasepool {
     Check(![XGTXDigest(@"id:1:old") isEqual:XGTXDigest(@"id:1:edited")],@"edited content has a new key");
     [e enqueue:@"long" text:longText language:@"ja"];
     Check(Wait(^BOOL{return [e cached:@"long"]!=nil;}),@"long Unicode post completes via bounded requests");
-    Check(peak<=2,@"network concurrency bounded at two");[e invalidate];
+    Check(peak<=1,@"Google network concurrency bounded at one");[e invalidate];
 
     __block NSTimeInterval now=100;
     XGTXEngine *rate=Engine(^NSTimeInterval{return now;},0);
@@ -184,7 +191,9 @@ int main(void) {@autoreleasepool {
     now=1304;[router tickWithVisibleKeys:both];Check(officialStarts==2,@"half-open circuit allows only one pending probe");
     later.result=officialText;[router tickWithVisibleKeys:both];Check(officialStarts==3,@"successful probe restores official priority");
     now=1313;[router tickWithVisibleKeys:both];
-    Check(Wait(^BOOL{return [dual cached:@"probe-queued"]!=nil;}),@"8s official timeout falls back automatically");
+    Check(![dual cached:@"probe-queued"] && Count(@"ProbeQueued")==0,@"a slow official request does not unlock Google");
+    now=1335;[router tickWithVisibleKeys:both];
+    Check(![dual cached:@"probe-queued"] && Count(@"ProbeQueued")==0 && [router.statistics[@"deferrals"] unsignedIntegerValue]==1,@"30s wait defers instead of manufacturing official failure");
     NSUInteger requestsBefore=[dual.statistics[@"requests"] unsignedIntegerValue];
     for(NSUInteger i=0;i<1000;i++) [router submit:@"fallback" text:@"DualFallback" language:@"en" context:fail];
     Check([dual.statistics[@"requests"] unsignedIntegerValue]==requestsBefore && officialStarts==3,@"shared successful cache prevents requests on both providers");
@@ -194,6 +203,7 @@ int main(void) {@autoreleasepool {
     FixtureHelper *helper=FixtureHelper.new;
     XGTXResult *google=XGTXResult.new;google.text=@"你好 & <你好>";google.language=@"en";
     Check(XATNativePublish(original,helper,google,original.text)==2,@"Google result is published through native translation wrapper");
+    Check(forbiddenInfoInitializers==0 && factoryCalls==1,@"crash regression: use native helper factory, never T1PostTranslationInfo.init");
     T1PostTranslationInfo *info=[helper getInfoFor:original];T1TranslatedStatusViewModel *wrapper=info.translatedStatus;
     Check([wrapper.text isEqual:google.text] && [((FixtureOriginal *)wrapper.representedStatus).text isEqual:original.text],@"native wrapper shows translation while representedStatus preserves original");
     Check(![wrapper.text containsString:@"已翻译"] && [wrapper.translation.translationSource isEqual:@"Google"],@"no custom hint in text; native provider attribution preserved");
@@ -225,9 +235,55 @@ int main(void) {@autoreleasepool {
     XTranslationRouter *guard=[[XTranslationRouter alloc] initWithEngine:guarded clock:^NSTimeInterval{return now;} start:^BOOL(id context){(void)context;return YES;} inspect:^XOfficialObservation *(id context){return context;}];
     XOfficialObservation *wrong=XOfficialObservation.new;XGTXResult *wrongResult=XGTXResult.new;wrongResult.text=@"OriginalIsNotTranslated";wrongResult.language=@"en";wrong.result=wrongResult;
     [guard submit:@"wrong" text:wrongResult.text language:@"en" context:wrong];[guard tickWithVisibleKeys:[NSSet setWithObject:@"wrong"]];
-    Check(Wait(^BOOL{return [guarded cached:@"wrong"]!=nil;}),@"router falls back after unchanged official response");
-    Check(![[guarded cached:@"wrong"].text isEqual:@"OriginalIsNotTranslated"] && [guard.statistics[@"officialSuccesses"] unsignedIntegerValue]==0,@"original text cannot poison shared official cache");[guarded invalidate];
-    puts("PASS: native translation extraction regression, unchanged-response rejection, native wrapper/body verification, native dynamic notifications, official hint only, provider attribution, show-original, dual-engine fallback/cache/circuit and GTX rate controls");
+    Check(![guarded cached:@"wrong"] && Count(@"OriginalIsNotTranslated")==0 && [guard.statistics[@"officialSuccesses"] unsignedIntegerValue]==0,@"unchanged response neither poisons cache nor activates Google without native failure");[guarded invalidate];
+    // Moving, recycled and offscreen views cannot satisfy the dwell policy.
+    now=5000;XDwellGate *gate=[[XDwellGate alloc] initWithClock:^NSTimeInterval{return now;} delay:1.0];NSObject *view=NSObject.new;
+    for(NSUInteger i=0;i<100;i++) {
+        now+=0.02;
+        Check(![gate eligible:view key:[NSString stringWithFormat:@"passed-%lu",(unsigned long)i] visible:YES stationary:NO position:100],@"fast flings never qualify");
+    }
+    Check(![gate eligible:view key:@"read" visible:YES stationary:YES position:100],@"dwell begins when motion stops");
+    now+=0.99;Check(![gate eligible:view key:@"read" visible:YES stationary:YES position:100],@"no premature request");
+    now+=0.02;Check([gate eligible:view key:@"read" visible:YES stationary:YES position:100],@"stable one-second view qualifies");
+    Check(![gate eligible:view key:@"recycled" visible:YES stationary:YES position:100],@"reused cell resets dwell");
+    now+=1.1;Check(![gate eligible:view key:@"recycled" visible:YES stationary:YES position:110],@"programmatic position change resets dwell");
+    now+=1.1;Check([gate eligible:view key:@"recycled" visible:YES stationary:YES position:110],@"stationary programmatic scroll end can qualify");
+    Check(![gate eligible:view key:@"recycled" visible:NO stationary:YES position:110],@"offscreen resets dwell");
+    now+=2;Check(![gate eligible:view key:@"recycled" visible:YES stationary:YES position:110],@"returning view must dwell anew");
+    __weak NSObject *weakView;
+    @autoreleasepool {NSObject *temporary=NSObject.new;weakView=temporary;[gate eligible:temporary key:@"weak" visible:YES stationary:YES position:0];}
+    Check(!weakView,@"dwell metadata does not retain offscreen views");
+
+    XGTXEngine *paused=Engine(^NSTimeInterval{return NSDate.timeIntervalSinceReferenceDate;},0);
+    [paused setEligibleKeys:NSSet.set];[paused enqueue:@"denied" text:@"MovingDenied" language:@"en"];
+    Check(Count(@"MovingDenied")==0,@"paused engine rejects new network jobs");
+    [paused setEligibleKeys:[NSSet setWithArray:@[@"keep",@"drop"]]];
+    [paused enqueue:@"keep" text:@"AlreadyReading" language:@"en"];
+    [paused enqueue:@"drop" text:@"OffscreenQueued" language:@"en"];
+    [paused setEligibleKeys:NSSet.set];
+    Check(Wait(^BOOL{return [paused cached:@"keep"]!=nil;}),@"already-started result may complete into cache");
+    Check(Count(@"OffscreenQueued")==0,@"completion pump never starts a queued item after scrolling resumes");[paused invalidate];
+
+    now=6000;XGTXEngine *strict=Engine(^NSTimeInterval{return now;},0);__block NSUInteger starts=0;
+    XTranslationRouter *policy=[[XTranslationRouter alloc] initWithEngine:strict clock:^NSTimeInterval{return now;} start:^BOOL(id context){(void)context;starts++;return YES;} inspect:^XOfficialObservation *(id context){return context;}];
+    XOfficialObservation *pending=XOfficialObservation.new;
+    [policy submit:@"passed" text:@"FastPassed" language:@"en" context:pending];[policy tickWithVisibleKeys:NSSet.set];
+    Check(starts==0 && Count(@"FastPassed")==0,@"ineligible queue is removed before either provider starts");
+    [policy submit:@"read" text:@"StrictReading" language:@"en" context:pending];[policy tickWithVisibleKeys:[NSSet setWithObject:@"read"]];
+    Check(starts==1 && Count(@"StrictReading")==0,@"stable post starts official only");
+    now=6009;[policy tickWithVisibleKeys:[NSSet setWithObject:@"read"]];Check(Count(@"StrictReading")==0,@"eight-second delay is not a native failure");
+    pending.failed=YES;pending.code=60;[policy tickWithVisibleKeys:[NSSet setWithObject:@"read"]];
+    Check(Wait(^BOOL{return [strict cached:@"read"]!=nil;}),@"confirmed native failure enables Google automatically");
+    XOfficialObservation *next=XOfficialObservation.new;
+    [policy submit:@"cooldown-read" text:@"StrictCooldownRead" language:@"en" context:next];
+    Check(Count(@"StrictCooldownRead")==0,@"submit itself never issues network even after official failure");
+    [policy tickWithVisibleKeys:NSSet.set];Check(Count(@"StrictCooldownRead")==0,@"cooldown does not translate posts passed during motion");[strict invalidate];
+    XGTXEngine *missing=Engine(^NSTimeInterval{return now;},0);
+    XTranslationRouter *unavailable=[[XTranslationRouter alloc] initWithEngine:missing clock:^NSTimeInterval{return now;} start:^BOOL(id context){(void)context;return NO;} inspect:^XOfficialObservation *(id context){return context;}];
+    [unavailable submit:@"no-route" text:@"NativeRouteMissing" language:@"en" context:next];[unavailable tickWithVisibleKeys:[NSSet setWithObject:@"no-route"]];
+    Check(Count(@"NativeRouteMissing")==0 && [unavailable.statistics[@"fallbacks"] unsignedIntegerValue]==0,@"missing native route never impersonates official failure");[missing invalidate];
+    Check(forbiddenInfoInitializers==0,@"all publications avoid the unavailable native initializer");
+    puts("PASS: crash factory regression, stable dwell, fast scrolling/offscreen/reuse, serial requests, paused completion pump, Google only after native failure, no timeout fallback, native translation UI, successful cache and retry controls");
 
     return 0;
 }}

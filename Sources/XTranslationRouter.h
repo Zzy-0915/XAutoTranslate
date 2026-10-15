@@ -2,7 +2,7 @@
 NS_ASSUME_NONNULL_BEGIN
 @interface XOfficialObservation : NSObject
 @property(nonatomic,strong,nullable) XGTXResult *result;
-@property(nonatomic) BOOL failed,inFlight;
+@property(nonatomic) BOOL failed,inFlight,unavailable;
 @property(nonatomic) NSInteger code;
 @end
 @interface XTranslationRouter : NSObject

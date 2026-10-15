@@ -24,6 +24,7 @@ FOUNDATION_EXPORT NSArray<NSString *> *XGTXChunks(NSString *text);
 - (void)storeResult:(NSString *)key result:(XGTXResult *)result;
 - (void)enqueue:(NSString *)key text:(NSString *)text language:(NSString *)language;
 - (void)keepQueuedKeys:(NSSet<NSString *> *)visibleKeys;
+- (void)setEligibleKeys:(nullable NSSet<NSString *> *)keys;
 - (void)pump;
 - (NSDictionary<NSString *,NSNumber *> *)statistics;
 - (void)invalidate;

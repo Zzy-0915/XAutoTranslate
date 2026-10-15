@@ -74,6 +74,7 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
 @property(nonatomic,strong) NSMutableDictionary<NSString *,XGTXJob *> *jobs;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSNumber *> *failedUntil;
 @property(nonatomic,strong) NSMutableOrderedSet<NSString *> *queue;
+@property(nonatomic,copy,nullable) NSSet<NSString *> *eligibleKeys;
 @property(nonatomic,strong) NSURLSession *session;
 @property(nonatomic,copy) NSTimeInterval (^clock)(void);
 @property(nonatomic) NSTimeInterval interval,nextStart,cooldown,wakeAt;
@@ -112,7 +113,7 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
 }
 - (void)enqueue:(NSString *)key text:(NSString *)text language:(NSString *)language {
     NSAssert(NSThread.isMainThread,@"main-thread scheduler");
-    if(self.invalidated || !text.length || XGTXChinese(language) || [self cached:key]) return;
+    if(self.invalidated || !text.length || XGTXChinese(language) || (self.eligibleKeys && ![self.eligibleKeys containsObject:key]) || [self cached:key]) return;
     if(self.jobs[key]) {self.joined++;return;}
     if(self.failedUntil[key].doubleValue>self.clock()) return;
     if(self.jobs.count>=64) {XADLog("GTX","queue full; visible item deferred");return;}
@@ -138,6 +139,11 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
         [self.queue removeObject:key];[self.jobs removeObjectForKey:key];
     }
 }
+- (void)setEligibleKeys:(NSSet<NSString *> *)keys {
+    NSAssert(NSThread.isMainThread,@"main-thread scheduler");
+    _eligibleKeys=keys.copy;
+    if(keys) [self keepQueuedKeys:keys];
+}
 - (void)complete:(XGTXJob *)job {
     NSString *translated=[job.parts componentsJoinedByString:@""];
     if(!XGTXTranslationChanged(translated,job.original)) {
@@ -152,7 +158,7 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
 - (void)pump {
     NSAssert(NSThread.isMainThread,@"main-thread scheduler");
     if(self.invalidated) return;
-    while(self.active<2 && self.queue.count) {
+    while(self.active<1 && self.queue.count) {
         NSTimeInterval now=self.clock();
         NSTimeInterval wait=MAX(self.nextStart,self.cooldown)-now;
         if(wait>0) {[self wakeAfter:wait];return;}
@@ -164,6 +170,7 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
         }
         if(!job) {[self wakeAfter:earliest-now];return;}
         [self.queue removeObject:job.key];
+        if(self.eligibleKeys && ![self.eligibleKeys containsObject:job.key]) {[self.jobs removeObjectForKey:job.key];continue;}
         while(job.index<job.chunks.count) {
             XGTXResult *saved=self.segments[XGTXDigest(job.chunks[job.index])];
             if(!saved) break;
