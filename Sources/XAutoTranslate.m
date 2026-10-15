@@ -160,8 +160,9 @@ static XOfficialObservation *InspectOfficial(XATNativeContext *context) {
         NSString *text=String(Object(automatic,@"translation"));
         if(!text.length && state==3) {
             id translated=Object(info,@"translatedStatus");
+            id actual=Status(translated) ?: translated;
             readingOriginal++;
-            @try {text=String(Object(translated,@"fullText")) ?: String(Object(translated,@"text"));}
+            @try {text=String(Object(actual,@"fullText")) ?: String(Object(actual,@"text")) ?: String(Object(translated,@"text"));}
             @finally {readingOriginal--;}
         }
         if(text.length) {XGTXResult *result=XGTXResult.new;result.text=text;result.language=@"und";observation.result=result;}

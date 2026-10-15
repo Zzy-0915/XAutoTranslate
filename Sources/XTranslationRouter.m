@@ -57,7 +57,7 @@
     if(!observation.result.text.length) return NO;
     self.officialSuccesses++;
     if(self.clock()>=self.officialUntil) {self.failures=0;self.officialUntil=0;}
-    XADLog("ROUTER","official success key=%.12s circuit=CLOSED",job.key.UTF8String);
+    XADLog("ROUTER","official success key=%.12s officialCooldown=%.1f",job.key.UTF8String,MAX(0,self.officialUntil-self.clock()));
     [self.engine storeSuccess:job.key text:observation.result.text language:job.language];
     return YES;
 }
