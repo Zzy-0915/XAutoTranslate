@@ -1,4 +1,4 @@
-name: Build JailFools Dylib (No Layout Hooks)
+name: Build JailFools Dylib (Foreground Recovery)
 
 on:
   push:
@@ -29,7 +29,13 @@ jobs:
           #import <objc/message.h>
           #import <math.h>
 
-          static NSMutableSet *gHookedKeys, *gInFlight;
+          static NSMutableDictionary *gHookIMPs;
+          static NSMutableSet *gInFlight, *gTranslateClasses;
+          static NSMutableDictionary *gTasks, *gTaskTokens, *gTaskStarted;
+          static NSURLSession *gSession;
+          static NSTimer *gTimer;
+          static NSUInteger gRecoveryGeneration;
+          static BOOL gRecovering;
           static NSMutableDictionary *gTextCache, *gLangCache, *gRetryAfter;
           static NSHashTable<UIView *> *gViews;
           static NSLock *gLock;
@@ -37,8 +43,21 @@ jobs:
           static NSMutableSet *gShowOriginal;
           static NSMutableDictionary *gOriginalCache, *gFallbackIDs;
           static BOOL gEnforcing = NO;
+
           static void InspectAndTranslateView(UIView *view);
-          static const NSInteger kBodyTag = 998872, kStatusTag = 998873;
+          static void InstallHooks(void);
+          static void BeginVisibleDiscovery(void);
+          static void ScanTrackedViews(void);
+
+          @interface XTranslationSource : NSObject
+          @property(nonatomic, copy) NSString *text;
+          @end
+
+          @implementation XTranslationSource
+          @end
+
+          static const NSInteger kBodyTag = 998872;
+          static const NSInteger kStatusTag = 998873;
 
           @interface XTranslationButton : UIButton
           @property(nonatomic, weak) UIView *translationView;
@@ -50,60 +69,83 @@ jobs:
               UIView *view=self.translationView;
               NSString *tid=objc_getAssociatedObject(view,&kID);
               if (!tid) return;
-              if ([gShowOriginal containsObject:tid]) [gShowOriginal removeObject:tid];
-              else [gShowOriginal addObject:tid];
+
+              if ([gShowOriginal containsObject:tid]) {
+                  [gShowOriginal removeObject:tid];
+              } else {
+                  [gShowOriginal addObject:tid];
+              }
+
               for (UIView *candidate in gViews.allObjects) {
-                  if ([objc_getAssociatedObject(candidate,&kID) isEqualToString:tid]) InspectAndTranslateView(candidate);
+                  if ([objc_getAssociatedObject(candidate,&kID) isEqualToString:tid]) {
+                      InspectAndTranslateView(candidate);
+                  }
               }
           }
           @end
 
           @interface XTopAlignedLabel : UILabel
+          @property(nonatomic, weak) UIView *translationView;
           @end
 
           @implementation XTopAlignedLabel
           - (void)drawTextInRect:(CGRect)rect {
-              CGRect r = [self textRectForBounds:rect limitedToNumberOfLines:self.numberOfLines];
-              r.origin.y = rect.origin.y;
+              CGRect r=[self textRectForBounds:rect limitedToNumberOfLines:self.numberOfLines];
+              r.origin.y=rect.origin.y;
               [super drawTextInRect:r];
           }
           @end
 
           static id SafeCallObject(id obj, SEL sel) {
               if (!obj || ![obj respondsToSelector:sel]) return nil;
-              NSMethodSignature *s = [obj methodSignatureForSelector:sel];
-              if (!s || s.numberOfArguments != 2 || s.methodReturnType[0] != '@') return nil;
-              return ((id(*)(id, SEL))objc_msgSend)(obj, sel);
+              NSMethodSignature *s=[obj methodSignatureForSelector:sel];
+              if (!s || s.numberOfArguments!=2 || s.methodReturnType[0]!='@') return nil;
+              return ((id(*)(id,SEL))objc_msgSend)(obj,sel);
           }
 
           static NSString *FriendlyLanguageName(NSString *code) {
               if (![code isKindOfClass:NSString.class] || !code.length) return @"外语";
-              NSString *c = code.lowercaseString;
-              NSArray *codes = @[@"en",@"ko",@"ja",@"fr",@"de",@"es",@"ru",@"ar",@"pt",@"it",@"th",@"vi",@"tr",@"id",@"nl"];
-              NSArray *names = @[@"英语",@"韩语",@"日语",@"法语",@"德语",@"西班牙语",@"俄语",@"阿拉伯语",@"葡萄牙语",@"意大利语",@"泰语",@"越南语",@"土耳其语",@"印尼语",@"荷兰语"];
-              for (NSUInteger i=0; i<codes.count; i++) if ([c hasPrefix:codes[i]]) return names[i];
+              NSString *c=code.lowercaseString;
+              NSArray *codes=@[@"en",@"ko",@"ja",@"fr",@"de",@"es",@"ru",@"ar",@"pt",@"it",@"th",@"vi",@"tr",@"id",@"nl"];
+              NSArray *names=@[@"英语",@"韩语",@"日语",@"法语",@"德语",@"西班牙语",@"俄语",@"阿拉伯语",@"葡萄牙语",@"意大利语",@"泰语",@"越南语",@"土耳其语",@"印尼语",@"荷兰语"];
+              for (NSUInteger i=0;i<codes.count;i++) {
+                  if ([c hasPrefix:codes[i]]) return names[i];
+              }
               return @"外语";
           }
 
           static BOOL IsValidForeignText(NSString *raw) {
               if (!raw.length) return NO;
-              NSUInteger han=0, kana=0, foreign=0, words=0;
-              NSMutableString *clean = NSMutableString.new;
+              NSUInteger han=0,kana=0,foreign=0,words=0;
+              NSMutableString *clean=NSMutableString.new;
+
               for (NSString *w in [raw componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]) {
-                  if (!w.length || [w hasPrefix:@"http://"] || [w hasPrefix:@"https://"] || [w hasPrefix:@"@"] || [w hasPrefix:@"#"]) continue;
-                  words++; [clean appendString:w];
+                  if (!w.length ||
+                      [w hasPrefix:@"http://"] ||
+                      [w hasPrefix:@"https://"] ||
+                      [w hasPrefix:@"@"] ||
+                      [w hasPrefix:@"#"]) continue;
+                  words++;
+                  [clean appendString:w];
               }
-              for (NSUInteger i=0; i<clean.length; i++) {
-                  unichar c = [clean characterAtIndex:i];
-                  if ((c>=0x3040 && c<=0x30FF) || (c>=0x31F0 && c<=0x31FF) || (c>=0xAC00 && c<=0xD7AF)) {
+
+              for (NSUInteger i=0;i<clean.length;i++) {
+                  unichar c=[clean characterAtIndex:i];
+                  if ((c>=0x3040 && c<=0x30FF) ||
+                      (c>=0x31F0 && c<=0x31FF) ||
+                      (c>=0xAC00 && c<=0xD7AF)) {
                       kana++;
                       foreign++;
                   } else if (c>=0x4E00 && c<=0x9FFF) {
                       han++;
-                  } else if ((c>='a' && c<='z') || (c>='A' && c<='Z') || (c>=0x00C0 && c<=0x024F) || (c>=0x0400 && c<=0x06FF)) {
+                  } else if ((c>='a' && c<='z') ||
+                             (c>='A' && c<='Z') ||
+                             (c>=0x00C0 && c<=0x024F) ||
+                             (c>=0x0400 && c<=0x06FF)) {
                       foreign++;
                   }
               }
+
               if (kana>=2) return YES;
               NSUInteger total=han+foreign;
               if (total<4 || (words<2 && foreign<6)) return NO;
@@ -118,12 +160,14 @@ jobs:
           static NSString *RawTextWalk(id obj, NSHashTable *seen, NSUInteger depth) {
               if (!obj || depth>10 || [seen containsObject:obj]) return nil;
               [seen addObject:obj];
+
               for (NSString *key in @[@"displayText",@"text",@"fullText",@"renderedText"]) {
-                  id v=SafeCallObject(obj, NSSelectorFromString(key));
+                  id v=SafeCallObject(obj,NSSelectorFromString(key));
                   if ([v isKindOfClass:NSString.class] && [v length]) return v;
               }
+
               for (NSString *key in SubKeys()) {
-                  NSString *v=RawTextWalk(SafeCallObject(obj, NSSelectorFromString(key)),seen,depth+1);
+                  NSString *v=RawTextWalk(SafeCallObject(obj,NSSelectorFromString(key)),seen,depth+1);
                   if (v.length) return v;
               }
               return nil;
@@ -139,13 +183,18 @@ jobs:
 
           static BOOL IsForeignTranslatableViewModel(id obj) {
               if (!obj) return NO;
+
               for (NSString *key in @[@"originalLanguage",@"language",@"lang"]) {
                   id v=SafeCallObject(obj,NSSelectorFromString(key));
                   if ([v isKindOfClass:NSString.class]) {
                       NSString *c=[v lowercaseString];
-                      if ([c hasPrefix:@"zh"] || [@[@"und",@"zxx",@"qme",@"qam",@"qht",@"qst",@"art"] containsObject:c]) return NO;
+                      if ([c hasPrefix:@"zh"] ||
+                          [@[@"und",@"zxx",@"qme",@"qam",@"qht",@"qst",@"art"] containsObject:c]) {
+                          return NO;
+                      }
                   }
               }
+
               NSString *text=ExtractModelRawText(obj);
               return text ? IsValidForeignText(text) : YES;
           }
@@ -153,11 +202,14 @@ jobs:
           static NSString *IDWalk(id obj, NSHashTable *seen, NSUInteger depth) {
               if (!obj || depth>10 || [seen containsObject:obj]) return nil;
               [seen addObject:obj];
+
               for (NSString *key in @[@"statusIDString",@"statusID",@"tweetIDString",@"tweetID",@"focalStatusID",@"entryID"]) {
                   SEL sel=NSSelectorFromString(key);
                   if (![obj respondsToSelector:sel]) continue;
+
                   NSMethodSignature *s=[obj methodSignatureForSelector:sel];
                   if (!s || s.numberOfArguments!=2) continue;
+
                   if (s.methodReturnType[0]=='@') {
                       id v=((id(*)(id,SEL))objc_msgSend)(obj,sel);
                       if ([v isKindOfClass:NSString.class] && [v length]) return v;
@@ -170,6 +222,7 @@ jobs:
                       if (v>0) return [NSString stringWithFormat:@"%llu",v];
                   }
               }
+
               for (NSString *key in SubKeys()) {
                   NSString *v=IDWalk(SafeCallObject(obj,NSSelectorFromString(key)),seen,depth+1);
                   if (v) return v;
@@ -180,8 +233,10 @@ jobs:
           static NSString *ExtractRealTweetID(id obj) {
               NSString *v=IDWalk(obj,IdentitySet(),0);
               if (v) return v;
+
               NSString *text=ExtractModelRawText(obj);
               if (!text.length) return [NSString stringWithFormat:@"ptr:%p",obj];
+
               [gLock lock];
               NSString *known=gFallbackIDs[text];
               [gLock unlock];
@@ -197,19 +252,32 @@ jobs:
 
           static UIView *FindTweetContainerView(UIView *view) {
               UIView *best=view.superview;
-              for (UIView *cur=view.superview; cur && ![cur isKindOfClass:UIWindow.class]; cur=cur.superview) {
+
+              for (UIView *cur=view.superview;
+                   cur && ![cur isKindOfClass:UIWindow.class];
+                   cur=cur.superview) {
                   NSString *name=NSStringFromClass(cur.class);
-                  if ([cur isKindOfClass:UITableViewCell.class] || [cur isKindOfClass:UICollectionViewCell.class] || [name containsString:@"StatusView"] || [name containsString:@"Cell"]) return cur;
+                  if ([cur isKindOfClass:UITableViewCell.class] ||
+                      [cur isKindOfClass:UICollectionViewCell.class] ||
+                      [name containsString:@"StatusView"] ||
+                      [name containsString:@"Cell"]) {
+                      return cur;
+                  }
                   if (cur.bounds.size.width>200 && cur.bounds.size.height>45) best=cur;
               }
               return best;
           }
 
           static UIColor *ResolveBackgroundColor(UIView *view) {
-              for (UIView *cur=view; cur && ![cur isKindOfClass:UIWindow.class]; cur=cur.superview) {
+              for (UIView *cur=view;
+                   cur && ![cur isKindOfClass:UIWindow.class];
+                   cur=cur.superview) {
                   UIColor *c=cur.backgroundColor;
                   CGFloat alpha=0;
-                  if (([c getRed:NULL green:NULL blue:NULL alpha:&alpha] || [c getWhite:NULL alpha:&alpha]) && alpha>0.9) return c;
+                  if (([c getRed:NULL green:NULL blue:NULL alpha:&alpha] ||
+                       [c getWhite:NULL alpha:&alpha]) && alpha>0.9) {
+                      return c;
+                  }
               }
               return UIColor.systemBackgroundColor;
           }
@@ -217,36 +285,60 @@ jobs:
           static NSString *ExtractTextFromView(UIView *view) {
               NSString *saved=objc_getAssociatedObject(view,&kOriginalBody);
               if (saved.length) return saved;
-              id model=SafeCallObject(view,NSSelectorFromString(@"attributedTextModel")) ?: SafeCallObject(view,NSSelectorFromString(@"textModel"));
-              id attr=SafeCallObject(model,NSSelectorFromString(@"attributedString")) ?: SafeCallObject(view,NSSelectorFromString(@"attributedText")) ?: SafeCallObject(view,NSSelectorFromString(@"attributedString"));
-              if ([attr isKindOfClass:NSAttributedString.class] && [attr length]) return [attr string];
-              id text=SafeCallObject(view,NSSelectorFromString(@"text")) ?: SafeCallObject(view,NSSelectorFromString(@"titleText"));
+
+              id model=SafeCallObject(view,NSSelectorFromString(@"attributedTextModel")) ?:
+                       SafeCallObject(view,NSSelectorFromString(@"textModel"));
+              id attr=SafeCallObject(model,NSSelectorFromString(@"attributedString")) ?:
+                      SafeCallObject(view,NSSelectorFromString(@"attributedText")) ?:
+                      SafeCallObject(view,NSSelectorFromString(@"attributedString"));
+
+              if ([attr isKindOfClass:NSAttributedString.class] && [attr length]) {
+                  return [attr string];
+              }
+
+              id text=SafeCallObject(view,NSSelectorFromString(@"text")) ?:
+                      SafeCallObject(view,NSSelectorFromString(@"titleText"));
               if ([text isKindOfClass:NSString.class] && [text length]) return text;
               return view.accessibilityLabel;
           }
 
           static UIView *FindBodyTextViewInContainer(UIView *container, UIView *translate, NSString **outText) {
               if (!container || !translate) return nil;
+
               CGRect tr=[translate convertRect:translate.bounds toView:container];
               NSMutableArray *subs=NSMutableArray.new;
               CollectSubviews(container,subs);
               UIView *best=nil;
               NSString *text=nil;
               CGFloat distance=CGFLOAT_MAX;
+
               for (UIView *sub in subs) {
-                  if (sub==translate || [sub isDescendantOfView:translate] || sub.tag==kBodyTag || sub.tag==kStatusTag || sub.hidden || sub.alpha<0.01) continue;
+                  if (sub==translate ||
+                      [sub isDescendantOfView:translate] ||
+                      sub.tag==kBodyTag ||
+                      sub.tag==kStatusTag ||
+                      sub.hidden ||
+                      sub.alpha<0.01) continue;
+
                   CGRect r=[sub convertRect:sub.bounds toView:container];
                   CGFloat dy=r.origin.y-tr.origin.y;
                   if (r.size.width<100 || r.size.height<14 || dy< -4 || dy>90) continue;
+
                   NSString *name=NSStringFromClass(sub.class);
-                  if (![name containsString:@"AttributedTextView"] && ![name containsString:@"BodyView"] && ![name containsString:@"TextView"] && ![sub isKindOfClass:UILabel.class]) continue;
+                  if (![name containsString:@"AttributedTextView"] &&
+                      ![name containsString:@"BodyView"] &&
+                      ![name containsString:@"TextView"] &&
+                      ![sub isKindOfClass:UILabel.class]) continue;
+
                   NSString *candidate=ExtractTextFromView(sub);
-                  if ((IsValidForeignText(candidate) || objc_getAssociatedObject(sub,&kOriginalBody)) && dy<distance) {
+                  if ((IsValidForeignText(candidate) ||
+                       objc_getAssociatedObject(sub,&kOriginalBody)) && dy<distance) {
                       best=sub;
                       text=candidate;
                       distance=dy;
                   }
               }
+
               if (outText) *outText=text;
               return best;
           }
@@ -254,6 +346,7 @@ jobs:
           static void RestoreNativeText(UIView *view) {
               NSMutableArray *subs=[NSMutableArray arrayWithObject:view];
               CollectSubviews(view,subs);
+
               for (UIView *sub in subs) {
                   NSNumber *alpha=objc_getAssociatedObject(sub,&kSavedAlpha);
                   if (alpha) {
@@ -273,6 +366,7 @@ jobs:
           static void LayoutStatus(UIView *view) {
               XTranslationButton *button=objc_getAssociatedObject(view,&kStatus);
               if (!button) return;
+
               UIView *host=FindTweetContainerView(view);
               if (!host || !view.window) {
                   button.hidden=YES;
@@ -282,21 +376,35 @@ jobs:
                   [button removeFromSuperview];
                   [host addSubview:button];
               }
+
               NSMutableArray *subs=NSMutableArray.new;
               CollectSubviews(view,subs);
+
               for (UIView *sub in subs) {
                   NSString *name=NSStringFromClass(sub.class);
-                  BOOL text=[sub isKindOfClass:UILabel.class] || [name containsString:@"AttributedTextView"];
-                  BOOL icon=[sub isKindOfClass:UIImageView.class] || [name containsString:@"IconView"];
-                  if ((!text && !icon) || sub.hidden || sub.bounds.size.width<=0 || sub.bounds.size.height<=0) continue;
-                  if (!objc_getAssociatedObject(sub,&kSavedAlpha)) objc_setAssociatedObject(sub,&kSavedAlpha,@(sub.alpha),OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                  BOOL text=[sub isKindOfClass:UILabel.class] ||
+                            [name containsString:@"AttributedTextView"];
+                  BOOL icon=[sub isKindOfClass:UIImageView.class] ||
+                            [name containsString:@"IconView"];
+                  if ((!text && !icon) ||
+                      sub.hidden ||
+                      sub.bounds.size.width<=0 ||
+                      sub.bounds.size.height<=0) continue;
+
+                  if (!objc_getAssociatedObject(sub,&kSavedAlpha)) {
+                      objc_setAssociatedObject(sub,&kSavedAlpha,@(sub.alpha),OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                  }
                   sub.alpha=0;
               }
+
               CGRect r=[view convertRect:view.bounds toView:host];
               CGFloat available=MAX(0,CGRectGetMaxX(host.bounds)-r.origin.x-8);
-              CGFloat measured=ceil([button.currentTitle sizeWithAttributes:@{NSFontAttributeName:button.titleLabel.font}].width)+8;
+              CGFloat measured=ceil([button.currentTitle sizeWithAttributes:@{
+                  NSFontAttributeName:button.titleLabel.font
+              }].width)+8;
               CGFloat height=MAX(ceil(button.titleLabel.font.lineHeight)+6,22);
               CGRect frame=CGRectMake(r.origin.x,r.origin.y+(r.size.height-height)/2,MIN(measured,available),height);
+
               if (!CGRectEqualToRect(button.frame,frame)) button.frame=frame;
               button.hidden=view.hidden || view.alpha<0.01 || available<=0;
               button.alpha=view.alpha;
@@ -307,6 +415,7 @@ jobs:
           static void TransformNativeTranslateButton(UIView *view, NSString *lang, BOOL finished) {
               if (!view) return;
               XTranslationButton *button=objc_getAssociatedObject(view,&kStatus);
+
               if (!button) {
                   button=[[XTranslationButton alloc] initWithFrame:CGRectZero];
                   button.tag=kStatusTag;
@@ -321,10 +430,16 @@ jobs:
                   [button addTarget:button action:@selector(toggleOriginal) forControlEvents:UIControlEventTouchUpInside];
                   objc_setAssociatedObject(view,&kStatus,button,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
               }
+
               NSString *tid=objc_getAssociatedObject(view,&kID);
               BOOL original=[gShowOriginal containsObject:tid];
-              NSString *title=!finished ? @"正在翻译…" : original ? @"原文 · 显示译文" : [NSString stringWithFormat:@"%@ 已翻译 · 查看原文",lang ?: @"外语"];
-              if (![button.currentTitle isEqualToString:title]) [button setTitle:title forState:UIControlStateNormal];
+              NSString *title=!finished ? @"正在翻译…" :
+                  original ? @"原文 · 显示译文" :
+                  [NSString stringWithFormat:@"%@ 已翻译 · 查看原文",lang ?: @"外语"];
+
+              if (![button.currentTitle isEqualToString:title]) {
+                  [button setTitle:title forState:UIControlStateNormal];
+              }
               if (button.enabled!=finished) button.enabled=finished;
               button.accessibilityLabel=title;
               LayoutStatus(view);
@@ -334,8 +449,10 @@ jobs:
               if (!container) return;
               NSMutableArray *subs=[NSMutableArray arrayWithObject:container];
               CollectSubviews(container,subs);
+
               for (UIView *sub in subs) {
-                  if (objc_getAssociatedObject(sub,&kVM) || objc_getAssociatedObject(sub,&kStatus)) {
+                  if (objc_getAssociatedObject(sub,&kVM) ||
+                      objc_getAssociatedObject(sub,&kStatus)) {
                       ClearStatus(sub);
                       UIView *overlay=objc_getAssociatedObject(sub,&kBodyOverlay);
                       [overlay removeFromSuperview];
@@ -353,7 +470,9 @@ jobs:
           }
 
           static void ApplyFallbackOverlay(UIView *view, NSString *text, NSString *lang, NSString *tid) {
-              if (!view || !text.length || ![objc_getAssociatedObject(view,&kID) isEqualToString:tid]) return;
+              if (!view || !text.length ||
+                  ![objc_getAssociatedObject(view,&kID) isEqualToString:tid]) return;
+
               UIView *container=FindTweetContainerView(view);
               NSString *raw=nil;
               UIView *body=FindBodyTextViewInContainer(container,view,&raw);
@@ -362,13 +481,17 @@ jobs:
               [gLock lock];
               NSString *original=gOriginalCache[tid];
               [gLock unlock];
-              if (!original.length) original=ExtractModelRawText(objc_getAssociatedObject(view,&kVM)) ?: raw;
+
+              if (!original.length) {
+                  original=ExtractModelRawText(objc_getAssociatedObject(view,&kVM)) ?: raw;
+              }
               objc_setAssociatedObject(body,&kOriginalBody,original,OBJC_ASSOCIATION_COPY_NONATOMIC);
 
               XTopAlignedLabel *overlay=objc_getAssociatedObject(view,&kBodyOverlay);
               if (!overlay) {
                   overlay=XTopAlignedLabel.new;
                   overlay.tag=kBodyTag;
+                  overlay.translationView=view;
                   overlay.font=[UIFont systemFontOfSize:15 weight:UIFontWeightRegular];
                   overlay.textColor=UIColor.labelColor;
                   overlay.numberOfLines=0;
@@ -378,33 +501,43 @@ jobs:
                   overlay.userInteractionEnabled=NO;
                   objc_setAssociatedObject(view,&kBodyOverlay,overlay,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
               }
+
               if (overlay.superview!=container) {
                   [overlay removeFromSuperview];
                   [container addSubview:overlay];
               }
+
               CGRect frame=[body convertRect:body.bounds toView:container];
               if (!CGRectEqualToRect(overlay.frame,frame)) overlay.frame=frame;
               overlay.backgroundColor=ResolveBackgroundColor(container);
               overlay.hidden=NO;
               overlay.alpha=1;
-              NSString *display=[gShowOriginal containsObject:tid] ? (original ?: raw ?: @"") : text;
+
+              NSString *display=[gShowOriginal containsObject:tid] ?
+                  (original ?: raw ?: @"") : text;
               if (![overlay.text isEqualToString:display]) overlay.text=display;
 
               UIView *status=objc_getAssociatedObject(view,&kStatus);
               NSUInteger count=container.subviews.count;
-              BOOL front=count>1 && container.subviews[count-2]==overlay && container.subviews.lastObject==status;
+              BOOL front=count>1 &&
+                  container.subviews[count-2]==overlay &&
+                  container.subviews.lastObject==status;
               if (!front) [container bringSubviewToFront:overlay];
+
               TransformNativeTranslateButton(view,lang,YES);
           }
 
           static BOOL IsViewInViewport(UIView *view) {
-              if (!view.window || view.hidden || view.alpha<0.01 || view.bounds.size.width<10 || view.bounds.size.height<5) return NO;
+              if (!view.window || view.hidden || view.alpha<0.01 ||
+                  view.bounds.size.width<10 || view.bounds.size.height<5) return NO;
               CGRect r=[view convertRect:view.bounds toView:view.window];
               return CGRectIntersectsRect(CGRectInset(view.window.bounds,0,-100),r);
           }
 
           static void InspectAndTranslateView(UIView *view) {
-              if (!IsViewInViewport(view)) return;
+              if (UIApplication.sharedApplication.applicationState!=UIApplicationStateActive ||
+                  !IsViewInViewport(view)) return;
+
               id vm=objc_getAssociatedObject(view,&kVM);
               NSString *tid=objc_getAssociatedObject(view,&kID);
               if (!vm || !tid) return;
@@ -440,19 +573,24 @@ jobs:
               ];
               if (!parts.URL) return;
 
+              NSString *token=NSUUID.UUID.UUIDString;
               [gLock lock];
               [gInFlight addObject:tid];
+              gTaskTokens[tid]=token;
+              gTaskStarted[tid]=[NSDate date];
               if (!gOriginalCache[tid]) gOriginalCache[tid]=[raw copy];
               [gLock unlock];
-              TransformNativeTranslateButton(view,nil,NO);
 
+              TransformNativeTranslateButton(view,nil,NO);
               __weak UIView *weakView=view;
               NSMutableURLRequest *request=[NSMutableURLRequest requestWithURL:parts.URL];
               request.timeoutInterval=20;
-              [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+
+              NSURLSessionDataTask *task=[gSession dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
                   NSMutableString *result=NSMutableString.new;
                   NSString *code=nil;
-                  NSInteger status=[response isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)response).statusCode : 0;
+                  NSInteger status=[response isKindOfClass:NSHTTPURLResponse.class] ?
+                      ((NSHTTPURLResponse *)response).statusCode : 0;
 
                   if (data && !error && status>=200 && status<300) {
                       id json=[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
@@ -460,16 +598,34 @@ jobs:
                           id segments=((NSArray *)json)[0];
                           if ([segments isKindOfClass:NSArray.class]) {
                               for (id seg in segments) {
-                                  if ([seg isKindOfClass:NSArray.class] && [seg count]>0 && [seg[0] isKindOfClass:NSString.class]) [result appendString:seg[0]];
+                                  if ([seg isKindOfClass:NSArray.class] &&
+                                      [seg count]>0 &&
+                                      [seg[0] isKindOfClass:NSString.class]) {
+                                      [result appendString:seg[0]];
+                                  }
                               }
                           }
-                          if ([json count]>=3 && [json[2] isKindOfClass:NSString.class]) code=json[2];
+                          if ([json count]>=3 &&
+                              [json[2] isKindOfClass:NSString.class]) {
+                              code=json[2];
+                          }
                       }
                   }
 
-                  NSString *friendly=FriendlyLanguageName(code), *translated=[result copy];
+                  NSString *friendly=FriendlyLanguageName(code);
+                  NSString *translated=[result copy];
+
                   [gLock lock];
+                  if (![gTaskTokens[tid] isEqualToString:token]) {
+                      [gLock unlock];
+                      return;
+                  }
+
                   [gInFlight removeObject:tid];
+                  [gTasks removeObjectForKey:tid];
+                  [gTaskTokens removeObjectForKey:tid];
+                  [gTaskStarted removeObjectForKey:tid];
+
                   if (translated.length) {
                       gTextCache[tid]=translated;
                       gLangCache[tid]=friendly;
@@ -484,18 +640,33 @@ jobs:
                   dispatch_async(dispatch_get_main_queue(),^{
                       UIView *strong=weakView;
                       if (!MatchesBinding(strong,tid)) return;
-                      if (translated.length) ApplyFallbackOverlay(strong,translated,friendly,tid);
-                      else ClearStatus(strong);
+                      if (translated.length) {
+                          ApplyFallbackOverlay(strong,translated,friendly,tid);
+                      } else {
+                          ClearStatus(strong);
+                      }
                   });
-              }] resume];
+              }];
+
+              [gLock lock];
+              BOOL current=[gTaskTokens[tid] isEqualToString:token];
+              if (current) gTasks[tid]=task;
+              [gLock unlock];
+
+              if (current) [task resume];
+              else [task cancel];
           }
 
           static void TrackTranslateView(UIView *view, id vm) {
               if (!view) return;
               if (![NSThread isMainThread]) {
-                  dispatch_async(dispatch_get_main_queue(),^{ TrackTranslateView(view,vm); });
+                  dispatch_async(dispatch_get_main_queue(),^{
+                      TrackTranslateView(view,vm);
+                  });
                   return;
               }
+
+              [gTranslateClasses addObject:NSStringFromClass(view.class)];
               NSString *oldID=objc_getAssociatedObject(view,&kID);
               if (!vm) return;
 
@@ -503,9 +674,12 @@ jobs:
               [gLock lock];
               NSString *cached=tid ? gTextCache[tid] : nil;
               [gLock unlock];
-              BOOL sameTweet=oldID && [oldID isEqualToString:tid];
 
-              if (oldID && !sameTweet) CleanOverlays(FindTweetContainerView(view) ?: view);
+              BOOL sameTweet=oldID && [oldID isEqualToString:tid];
+              if (oldID && !sameTweet) {
+                  CleanOverlays(FindTweetContainerView(view) ?: view);
+              }
+
               if (!sameTweet && !cached.length && !IsForeignTranslatableViewModel(vm)) {
                   ClearStatus(view);
                   objc_setAssociatedObject(view,&kVM,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -516,6 +690,7 @@ jobs:
               objc_setAssociatedObject(view,&kVM,vm,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
               objc_setAssociatedObject(view,&kID,tid,OBJC_ASSOCIATION_COPY_NONATOMIC);
               [gViews addObject:view];
+
               InspectAndTranslateView(view);
               dispatch_async(dispatch_get_main_queue(),^{
                   if (MatchesBinding(view,tid)) InspectAndTranslateView(view);
@@ -523,20 +698,27 @@ jobs:
           }
 
           static void ReplaceMethod(Class cls, SEL sel, IMP replacement, const char *types) {
-              if (!class_addMethod(cls,sel,replacement,types)) class_replaceMethod(cls,sel,replacement,types);
+              if (!class_addMethod(cls,sel,replacement,types)) {
+                  class_replaceMethod(cls,sel,replacement,types);
+              }
+              NSString *key=[NSString stringWithFormat:@"%@::%@",
+                  NSStringFromClass(cls),NSStringFromSelector(sel)];
+              gHookIMPs[key]=[NSValue valueWithPointer:(const void *)replacement];
           }
 
           static BOOL BeginHook(Class cls, SEL sel) {
               if (!cls || !class_getInstanceMethod(cls,sel)) return NO;
-              NSString *key=[NSString stringWithFormat:@"%@::%@",NSStringFromClass(cls),NSStringFromSelector(sel)];
-              if ([gHookedKeys containsObject:key]) return NO;
-              [gHookedKeys addObject:key];
-              return YES;
+              NSString *key=[NSString stringWithFormat:@"%@::%@",
+                  NSStringFromClass(cls),NSStringFromSelector(sel)];
+              NSValue *installed=gHookIMPs[key];
+              IMP actual=method_getImplementation(class_getInstanceMethod(cls,sel));
+              return !installed || installed.pointerValue!=(const void *)actual;
           }
 
           static void HookReuse(Class cls) {
               SEL sel=@selector(prepareForReuse);
               if (!BeginHook(cls,sel)) return;
+
               Method m=class_getInstanceMethod(cls,sel);
               IMP original=method_getImplementation(m);
               ReplaceMethod(cls,sel,imp_implementationWithBlock(^(UIView *self){
@@ -576,35 +758,253 @@ jobs:
               HookAdapter(objc_getClass("T1StandardStatusTranslateAdapter"));
           }
 
+          static void CancelPendingRequests(void) {
+              [gLock lock];
+              NSArray *tasks=gTasks.allValues;
+              [gTasks removeAllObjects];
+              [gTaskTokens removeAllObjects];
+              [gTaskStarted removeAllObjects];
+              [gInFlight removeAllObjects];
+              [gRetryAfter removeAllObjects];
+              [gLock unlock];
+
+              for (NSURLSessionDataTask *task in tasks) [task cancel];
+          }
+
+          static void ExpireStaleRequests(void) {
+              NSMutableArray *cancel=NSMutableArray.new;
+              [gLock lock];
+
+              for (NSString *tid in gTaskStarted.allKeys) {
+                  NSDate *started=gTaskStarted[tid];
+                  if (started.timeIntervalSinceNow > -35.0) continue;
+
+                  NSURLSessionDataTask *task=gTasks[tid];
+                  if (task) [cancel addObject:task];
+                  [gTasks removeObjectForKey:tid];
+                  [gTaskTokens removeObjectForKey:tid];
+                  [gTaskStarted removeObjectForKey:tid];
+                  [gInFlight removeObject:tid];
+                  [gRetryAfter removeObjectForKey:tid];
+              }
+              [gLock unlock];
+
+              for (NSURLSessionDataTask *task in cancel) [task cancel];
+          }
+
+          static void ScanTrackedViews(void) {
+              if (gEnforcing ||
+                  UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
+
+              gEnforcing=YES;
+              @try {
+                  ExpireStaleRequests();
+                  for (UIView *view in gViews.allObjects) {
+                      InspectAndTranslateView(view);
+                  }
+              } @finally {
+                  gEnforcing=NO;
+              }
+          }
+
+          static void TryDiscoverTranslateView(UIView *view) {
+              if (!view.window || view.tag==kBodyTag || view.tag==kStatusTag) return;
+
+              if (objc_getAssociatedObject(view,&kVM)) {
+                  [gViews addObject:view];
+                  return;
+              }
+
+              NSString *name=NSStringFromClass(view.class);
+              BOOL candidate=[gTranslateClasses containsObject:name] ||
+                  ([name rangeOfString:@"translate" options:NSCaseInsensitiveSearch].location!=NSNotFound &&
+                   ([view isKindOfClass:UIControl.class] || [name containsString:@"View"]));
+              if (!candidate || !IsViewInViewport(view)) return;
+
+              for (UIView *parent=view.superview;parent;parent=parent.superview) {
+                  if (objc_getAssociatedObject(parent,&kVM)) return;
+                  if ([parent isKindOfClass:UITableViewCell.class] ||
+                      [parent isKindOfClass:UICollectionViewCell.class]) break;
+              }
+
+              id vm=nil;
+              UIView *node=view;
+              for (NSUInteger depth=0;node && depth<4 && !vm;depth++,node=node.superview) {
+                  for (NSString *key in @[@"viewModel",@"statusViewModel",@"representedViewModel"]) {
+                      id possible=SafeCallObject(node,NSSelectorFromString(key));
+                      if (possible && ExtractModelRawText(possible).length) {
+                          vm=possible;
+                          break;
+                      }
+                  }
+              }
+
+              if (!vm) {
+                  NSString *raw=nil;
+                  FindBodyTextViewInContainer(FindTweetContainerView(view),view,&raw);
+                  if (IsValidForeignText(raw)) {
+                      XTranslationSource *source=XTranslationSource.new;
+                      source.text=raw;
+                      vm=source;
+                  }
+              }
+
+              if (vm) TrackTranslateView(view,vm);
+          }
+
+          static void DiscoverBatch(NSMutableArray<UIView *> *queue, NSUInteger generation, NSUInteger visited) {
+              if (generation!=gRecoveryGeneration ||
+                  UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
+
+              CFTimeInterval started=CACurrentMediaTime();
+              NSUInteger count=0;
+
+              while (queue.count &&
+                     count<60 &&
+                     CACurrentMediaTime()-started<0.004 &&
+                     visited<6000) {
+                  UIView *view=queue.lastObject;
+                  [queue removeLastObject];
+                  count++;
+                  visited++;
+
+                  if (view.tag==kBodyTag || view.tag==kStatusTag) {
+                      UIView *owner=nil;
+                      if ([view isKindOfClass:XTopAlignedLabel.class]) {
+                          owner=((XTopAlignedLabel *)view).translationView;
+                      } else if ([view isKindOfClass:XTranslationButton.class]) {
+                          owner=((XTranslationButton *)view).translationView;
+                      }
+                      if (!owner || ![owner isDescendantOfView:view.superview]) {
+                          [view removeFromSuperview];
+                      }
+                      continue;
+                  }
+
+                  if (view.hidden || view.alpha<0.01) continue;
+                  TryDiscoverTranslateView(view);
+                  [queue addObjectsFromArray:view.subviews];
+              }
+
+              if (queue.count && visited<6000) {
+                  dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.016*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+                      DiscoverBatch(queue,generation,visited);
+                  });
+              } else {
+                  gRecovering=NO;
+                  ScanTrackedViews();
+              }
+          }
+
+          static void BeginVisibleDiscovery(void) {
+              if (gRecovering ||
+                  UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
+
+              gRecovering=YES;
+              NSMutableArray *queue=NSMutableArray.new;
+
+              for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+                  if (![scene isKindOfClass:UIWindowScene.class] ||
+                      scene.activationState!=UISceneActivationStateForegroundActive) continue;
+
+                  for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+                      if (!window.hidden && window.alpha>0.01) [queue addObject:window];
+                  }
+              }
+
+              DiscoverBatch(queue,gRecoveryGeneration,0);
+          }
+
+          static void StartForegroundTimer(void) {
+              [gTimer invalidate];
+              __block NSUInteger ticks=0;
+
+              gTimer=[NSTimer timerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer){
+                  ScanTrackedViews();
+                  if (++ticks%16==0) {
+                      InstallHooks();
+                      BeginVisibleDiscovery();
+                  }
+              }];
+              [[NSRunLoop mainRunLoop] addTimer:gTimer forMode:NSRunLoopCommonModes];
+          }
+
+          static void ResumeTranslationEngine(void) {
+              if (UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
+
+              gRecoveryGeneration++;
+              gRecovering=NO;
+              CancelPendingRequests();
+              InstallHooks();
+              StartForegroundTimer();
+              ScanTrackedViews();
+              BeginVisibleDiscovery();
+
+              NSUInteger generation=gRecoveryGeneration;
+              for (NSNumber *delay in @[@0.8,@2.0]) {
+                  dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(delay.doubleValue*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+                      if (generation!=gRecoveryGeneration) return;
+                      InstallHooks();
+                      BeginVisibleDiscovery();
+                      ScanTrackedViews();
+                  });
+              }
+          }
+
+          static void PauseTranslationEngine(void) {
+              gRecoveryGeneration++;
+              gRecovering=NO;
+              [gTimer invalidate];
+              gTimer=nil;
+              CancelPendingRequests();
+          }
+
           __attribute__((constructor)) static void initTweak(void) {
               @autoreleasepool {
-                  gHookedKeys=NSMutableSet.new;
+                  gHookIMPs=NSMutableDictionary.new;
                   gInFlight=NSMutableSet.new;
+                  gTranslateClasses=NSMutableSet.new;
                   gTextCache=NSMutableDictionary.new;
                   gLangCache=NSMutableDictionary.new;
                   gRetryAfter=NSMutableDictionary.new;
+                  gTasks=NSMutableDictionary.new;
+                  gTaskTokens=NSMutableDictionary.new;
+                  gTaskStarted=NSMutableDictionary.new;
                   gViews=[NSHashTable weakObjectsHashTable];
                   gLock=NSLock.new;
                   gShowOriginal=NSMutableSet.new;
                   gOriginalCache=NSMutableDictionary.new;
                   gFallbackIDs=NSMutableDictionary.new;
 
-                  dispatch_async(dispatch_get_main_queue(),^{
-                      InstallHooks();
-                      NSTimer *timer=[NSTimer timerWithTimeInterval:0.50 repeats:YES block:^(NSTimer *timer){
-                          if (gEnforcing || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
-                          gEnforcing=YES;
-                          @try {
-                              for (UIView *view in gViews.allObjects) InspectAndTranslateView(view);
-                          } @finally {
-                              gEnforcing=NO;
-                          }
-                      }];
-                      [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
-                  });
+                  NSURLSessionConfiguration *config=NSURLSessionConfiguration.ephemeralSessionConfiguration;
+                  config.timeoutIntervalForRequest=20;
+                  config.timeoutIntervalForResource=30;
+                  config.waitsForConnectivity=NO;
+                  gSession=[NSURLSession sessionWithConfiguration:config];
 
-                  dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+                  dispatch_async(dispatch_get_main_queue(),^{
+                      NSNotificationCenter *center=NSNotificationCenter.defaultCenter;
+
+                      [center addObserverForName:UIApplicationDidEnterBackgroundNotification
+                                         object:nil
+                                          queue:NSOperationQueue.mainQueue
+                                     usingBlock:^(NSNotification *note){
+                          PauseTranslationEngine();
+                      }];
+
+                      [center addObserverForName:UIApplicationDidBecomeActiveNotification
+                                         object:nil
+                                          queue:NSOperationQueue.mainQueue
+                                     usingBlock:^(NSNotification *note){
+                          ResumeTranslationEngine();
+                      }];
+
                       InstallHooks();
+                      ResumeTranslationEngine();
+
+                      dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+                          InstallHooks();
+                      });
                   });
               }
           }
@@ -625,6 +1025,6 @@ jobs:
       - name: Upload Dylib
         uses: actions/upload-artifact@v4
         with:
-          name: XAutoTranslate-JailFools
+          name: XAutoTranslate-JailFools-ForegroundRecovery
           path: output/XAutoTranslate.dylib
           if-no-files-found: error
