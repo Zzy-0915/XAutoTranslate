@@ -8,14 +8,10 @@
 #include <dlfcn.h>
 #include "XDiagnostics.h"
 #import "XGTXEngine.h"
-#import "XGTXNativeDisplay.h"
+#import "XNativeTranslation.h"
 #import "XTranslationRouter.h"
 
-// Verified selectors in the supplied X 12.33 (31) binary; native factory keeps
-// glyph layout, max-lines, width measurements and the cell's normal height path.
-@interface NSObject (XATNativeTextFactory)
-- (instancetype)initWithStatusID:(long long)statusID cardData:(id)card originalText:(NSString *)text fromUserID:(long long)userID date:(NSDate *)date;
-- (instancetype)initWithCanonicalStatus:(id)canonical fromUser:(id)user;
+@interface NSObject (XATNativeEvent)
 - (instancetype)initWithEventType:(id)type statusView:(id)view sourceView:(id)source;
 @end
 
@@ -29,6 +25,8 @@
 @interface XATNativeContext : NSObject
 @property(nonatomic,weak) UIView *view;
 @property(nonatomic,strong) id model;
+@property(nonatomic,copy) NSString *text,*language,*key;
+@property(nonatomic) NSInteger observedState;
 @end
 @implementation XATNativeContext
 @end
@@ -39,16 +37,15 @@ static id translationHelper,eventType;
 static id (*currentLanguage)(void);
 static _Thread_local unsigned routingOfficial;
 static void (*originalOfficial)(id,SEL,id,id);
-static NSCache<NSString *,id> *nativeModels;
+static NSString *dynamicUpdateKey,*animatedUpdateKey;
+static NSUInteger publications,notifications;
 static NSHashTable<UIView *> *views;
 static NSTimer *scanTimer;
 static NSMutableSet<NSString *> *changedKeys;
 static BOOL refreshPending,refreshing,installed;
 static unsigned attempts;
-static _Thread_local unsigned readingOriginal;
-static char sourceKey,viewKey,renderedKey;
+static char sourceKey,viewKey,notifiedKey;
 static Class statusClass;
-static id (*originalDisplay)(id,SEL,NSUInteger);
 static NSUInteger bindings;
 
 static id Object(id object,NSString *name) {
@@ -86,9 +83,7 @@ static XATSource *Source(id status) {
     NSString *version=String(Object(canonical,@"originalText")) ?: @"";
     XATSource *old=objc_getAssociatedObject(status,&sourceKey);
     if(old && old.canonical==canonical && old.note==note && [old.version isEqual:version]) return old;
-    readingOriginal++;
     NSString *text=String(Object(status,@"fullText")) ?: String(Object(status,@"text"));
-    readingOriginal--;
     if(!text.length || [text rangeOfCharacterFromSet:NSCharacterSet.letterCharacterSet].location==NSNotFound) return nil;
     NSString *language=String(Object(status,@"language")) ?: String(Object(canonical,@"language")) ?: @"und";
     if([language isEqual:@"und"]) language=[NLLanguageRecognizer dominantLanguageForString:text] ?: @"und";
@@ -98,34 +93,6 @@ static XATSource *Source(id status) {
     source.key=XGTXDigest([NSString stringWithFormat:@"zh-CN\n%@\n%@",identity,text]);
     objc_setAssociatedObject(status,&sourceKey,source,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return source;
-}
-static id DisplayFor(XATSource *source,XGTXResult *result,NSUInteger options) {
-    NSString *modelKey=[source.key stringByAppendingFormat:@":%lu",(unsigned long)options];
-    id cached=[nativeModels objectForKey:modelKey];if(cached) return cached;
-    NSString *code=[result.language isEqual:@"und"] ? source.language : result.language;
-    readingOriginal++;
-    id model=XGTXNativeDisplay(source.status,result.text,code,options,originalDisplay);
-    readingOriginal--;
-    if(model) [nativeModels setObject:model forKey:modelKey];
-    return model;
-}
-static id GoogleDisplay(id status,SEL selector,NSUInteger options) {
-    if(!readingOriginal && engine) {
-        XATSource *source=Source(Status(status) ?: status);
-        XGTXResult *saved=source && !XGTXChinese(source.language) ? [engine cached:source.key] : nil;
-        if(saved && !XGTXChinese(saved.language)) {
-            id native=DisplayFor(source,saved,options);
-            if(native) {
-                if(!objc_getAssociatedObject(status,&renderedKey)) {
-                    objc_setAssociatedObject(status,&renderedKey,source.key,OBJC_ASSOCIATION_COPY_NONATOMIC);
-                    XADLog("RENDER","cache hit key=%.12s nativeTextModel=1 networkRequest=0",source.key.UTF8String);
-                }
-                return native;
-            }
-            XADLog("RENDER","native factory unavailable; original body preserved");
-        }
-    }
-    return originalDisplay(status,selector,options);
 }
 static BOOL Visible(UIView *view) {
     if(!view.window || view.hidden || view.alpha<0.01 || view.bounds.size.width<10 || view.bounds.size.height<10) return NO;
@@ -156,22 +123,18 @@ static XOfficialObservation *InspectOfficial(XATNativeContext *context) {
     @try {
         id info=((id (*)(id,SEL,id))objc_msgSend)(translationHelper,getInfo,context.model);
         NSInteger state=Number(info,@"state");
-        id automatic=Object(context.model,@"grokTranslatedPost");
-        NSString *text=String(Object(automatic,@"translation"));
-        if(!text.length && state==3) {
-            id translated=Object(info,@"translatedStatus");
-            id actual=Status(translated) ?: translated;
-            readingOriginal++;
-            @try {text=String(Object(actual,@"fullText")) ?: String(Object(actual,@"text")) ?: String(Object(translated,@"text"));}
-            @finally {readingOriginal--;}
-        }
-        if(text.length) {XGTXResult *result=XGTXResult.new;result.text=text;result.language=@"und";observation.result=result;}
-        observation.failed=!text.length && (state==2 || state==3);
+        observation.result=XATNativeResult(context.model,info,context.text,context.language);
+        observation.failed=!observation.result && (state==2 || state==3);
         observation.inFlight=state==1 || state==4;
         observation.code=Number(Object(info,@"translationError"),@"code");
+        if(context.observedState!=state) {
+            context.observedState=state;
+            XADLog("OFFICIAL","state key=%.12s state=%ld validatedTranslation=%d wrapperClass=%s",context.key.UTF8String,(long)state,observation.result!=nil,NSStringFromClass([Object(info,@"translatedStatus") class]).UTF8String ?: "nil");
+        }
     } @catch(NSException *e) {(void)e;observation.failed=YES;XADLog("OFFICIAL","observe exception=%s",e.name.UTF8String);}
     return observation;
 }
+static void Refresh(void);
 static void Track(UIView *view) {
     if(!NSThread.isMainThread) return;
     [views addObject:view];
@@ -183,8 +146,14 @@ static void Track(UIView *view) {
         objc_setAssociatedObject(view,&viewKey,source.key,OBJC_ASSOCIATION_COPY_NONATOMIC);
         XADLog("VIEW","visible key=%.12s class=%s lang=%s",source.key.UTF8String,NSStringFromClass(view.class).UTF8String,source.language.UTF8String);
     }
-    XATNativeContext *context=XATNativeContext.new;context.view=view;context.model=Object(view,@"viewModel");
+    XATNativeContext *context=XATNativeContext.new;context.view=view;context.model=Object(view,@"viewModel");context.text=source.text;context.language=source.language;context.key=source.key;context.observedState=-1;
     [router submit:source.key text:source.text language:source.language context:context];
+    XGTXResult *saved=[engine cached:source.key];
+    id info=[translationHelper respondsToSelector:NSSelectorFromString(@"getInfoFor:")] ? ((id (*)(id,SEL,id))objc_msgSend)(translationHelper,NSSelectorFromString(@"getInfoFor:"),context.model) : nil;
+    if(saved && (!XATNativeMatches(info,saved.text) || ![objc_getAssociatedObject(context.model,&notifiedKey) isEqual:source.key])) {
+        [changedKeys addObject:source.key];
+        if(!refreshPending && !refreshing) {refreshPending=YES;dispatch_async(dispatch_get_main_queue(),^{Refresh();});}
+    }
 }
 static UITableView *Table(UIView *view) {
     for(UIView *parent=view.superview;parent;parent=parent.superview) if([parent isKindOfClass:UITableView.class]) return (id)parent;
@@ -194,45 +163,40 @@ static UICollectionView *Collection(UIView *view) {
     for(UIView *parent=view.superview;parent;parent=parent.superview) if([parent isKindOfClass:UICollectionView.class]) return (id)parent;
     return nil;
 }
-static void RefreshBody(UIView *view,unsigned depth) {
-    if(depth>8) return;
-    Class body=NSClassFromString(@"TTAStatusBodyTextView");
-    SEL changed=NSSelectorFromString(@"statusDidUpdate:");
-    if(body && [view isKindOfClass:body] && [view respondsToSelector:changed]) {
-        ((void (*)(id,SEL,BOOL))objc_msgSend)(view,changed,YES);
-        [view invalidateIntrinsicContentSize];[view setNeedsLayout];return;
-    }
-    for(UIView *child in view.subviews.copy) RefreshBody(child,depth+1);
-}
 static void Refresh(void) {
     refreshPending=NO;
     if(refreshing || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
-    NSMutableSet *ready=[NSMutableSet setWithSet:changedKeys];
-    NSMutableSet *notified=NSMutableSet.new;
+    NSSet *ready=changedKeys.copy;NSMutableSet *finished=NSMutableSet.new,*seenModels=NSMutableSet.new;
     NSHashTable *tables=NSHashTable.weakObjectsHashTable,*collections=NSHashTable.weakObjectsHashTable;
     BOOL postponed=NO;refreshing=YES;
     for(UIView *view in views.allObjects) {
         if(!Visible(view)) continue;
-        XATSource *source=ViewSource(view);
-        if(![ready containsObject:source.key ?: @""]) continue;
+        XATSource *source=ViewSource(view);if(![ready containsObject:source.key ?: @""]) continue;
         UIScrollView *scroll=Table(view) ?: (UIScrollView *)Collection(view);
         if(scroll.isDragging || scroll.isDecelerating || scroll.isTracking) {postponed=YES;continue;}
+        id model=Object(view,@"viewModel");XGTXResult *saved=[engine cached:source.key];
+        if(!model || !saved || [seenModels containsObject:model]) continue;
+        [seenModels addObject:model];
         @try {
-            if(![notified containsObject:source.key] && [source.status respondsToSelector:NSSelectorFromString(@"postStatusNotificationUserInfo:")]) {
-                ((void (*)(id,SEL,id))objc_msgSend)(source.status,NSSelectorFromString(@"postStatusNotificationUserInfo:"),@{});
-                [notified addObject:source.key];
-            }
-            RefreshBody(view,0);[view invalidateIntrinsicContentSize];[view setNeedsLayout];
+            NSUInteger applied=XATNativePublish(model,translationHelper,saved,source.text);
+            if(!applied) {XADLog("RENDER","native publish rejected key=%.12s; no synthetic translated hint",source.key.UTF8String);continue;}
+            if(applied==2) publications++;
+            if(XATNativeNotify(model,dynamicUpdateKey,animatedUpdateKey)) {
+                notifications++;
+                objc_setAssociatedObject(model,&notifiedKey,source.key,OBJC_ASSOCIATION_COPY_NONATOMIC);
+                [finished addObject:source.key];
+                XADLog("RENDER","native wrapper verified key=%.12s published=%d dynamicNotification=1 officialHint=1",source.key.UTF8String,applied==2);
+            } else XADLog("REFRESH","native dynamic notification unavailable key=%.12s",source.key.UTF8String);
+            [view invalidateIntrinsicContentSize];[view setNeedsLayout];
             UITableView *table=Table(view);if(table) [tables addObject:table];
             UICollectionView *collection=Collection(view);if(collection) [collections addObject:collection];
-        } @catch(NSException *e) {XADLog("REFRESH","native notification failed exception=%s",e.name.UTF8String);}
+        } @catch(NSException *e) {(void)e;XADLog("REFRESH","native publish exception=%s",e.name.UTF8String);}
     }
     [UIView performWithoutAnimation:^{
-        for(UITableView *table in tables.allObjects) @try {[table beginUpdates];[table endUpdates];} @catch(NSException *e) {XADLog("REFRESH","table relayout exception=%s",e.name.UTF8String);}
+        for(UITableView *table in tables.allObjects) @try {[table beginUpdates];[table endUpdates];} @catch(NSException *e) {(void)e;XADLog("REFRESH","table relayout exception=%s",e.name.UTF8String);}
         for(UICollectionView *collection in collections.allObjects) [collection.collectionViewLayout invalidateLayout];
     }];
-    [changedKeys minusSet:notified];
-    if(!postponed && !notified.count) [changedKeys removeAllObjects];
+    if(!postponed) [changedKeys minusSet:finished];
     refreshing=NO;
 }
 static void Tick(void) {
@@ -245,6 +209,7 @@ static void Tick(void) {
     if(changedKeys.count) Refresh();
 }
 static void __attribute__((unused)) Snapshot(void) {
+    XADLog("NATIVE","publications=%lu dynamicNotifications=%lu updateKeysReady=%d",(unsigned long)publications,(unsigned long)notifications,dynamicUpdateKey!=nil && animatedUpdateKey!=nil);
     NSDictionary *stats=engine.statistics;
     (void)stats;
     NSDictionary *routes=router.statistics;(void)routes;
@@ -264,7 +229,12 @@ static BOOL Replace(Class cls,SEL selector,IMP replacement,IMP *old) {
 }
 static BOOL NeverDisplay(id self,SEL selector) {(void)self;(void)selector;return NO;}
 static void BlockOfficialTranslation(id self,SEL selector,id event,id controller) {
-    if(routingOfficial && originalOfficial) {originalOfficial(self,selector,event,controller);return;}
+    id view=Object(event,@"statusView"),model=Object(view,@"viewModel");
+    XATSource *source=ViewSource(view);XGTXResult *saved=source ? [engine cached:source.key] : nil;
+    id info=[translationHelper respondsToSelector:NSSelectorFromString(@"getInfoFor:")] ? ((id (*)(id,SEL,id))objc_msgSend)(translationHelper,NSSelectorFromString(@"getInfoFor:"),model) : nil;
+    NSInteger state=Number(info,@"state");
+    BOOL cachedToggle=saved && (state==0 || state==3) && XATNativeMatches(info,saved.text);
+    if(originalOfficial && (routingOfficial || cachedToggle)) {originalOfficial(self,selector,event,controller);return;}
     XADLog("OFFICIAL","unmanaged native translation event suppressed; use router");
 }
 static void Install(void);
@@ -277,12 +247,14 @@ static void Install(void) {
         XADCoreStatus("停用：仅支持 X 12.33（31）");return;
     }
     statusClass=NSClassFromString(@"TFNTwitterStatus");
-    Class canonical=NSClassFromString(@"TFNTwitterCanonicalStatus");
-    SEL display=NSSelectorFromString(@"_tfn_displayTextModelForOptions:");
-    if(!class_getInstanceMethod(statusClass,display) || !class_getInstanceMethod(canonical,@selector(initWithStatusID:cardData:originalText:fromUserID:date:)) || !class_getInstanceMethod(statusClass,@selector(initWithCanonicalStatus:fromUser:))) {
-        XADLog("INSTALL","native text factory not ready attempt=%u",attempts);Retry();return;
+    if(!statusClass || !NSClassFromString(@"T1TranslatedStatusViewModel") || !NSClassFromString(@"TFSTwitterTranslation")) {
+        XADLog("INSTALL","native translation classes not ready attempt=%u",attempts);Retry();return;
     }
-    nativeModels=NSCache.new;nativeModels.countLimit=256;views=NSHashTable.weakObjectsHashTable;changedKeys=NSMutableSet.new;
+    views=NSHashTable.weakObjectsHashTable;changedKeys=NSMutableSet.new;
+    void *dynamic=dlsym(RTLD_DEFAULT,"TTAStatusViewCombinedViewModelContainsDynamicContentTypeKey");
+    void *animated=dlsym(RTLD_DEFAULT,"TTAStatusViewCombinedViewModelUpdateAnimatedKey");
+    if(dynamic) dynamicUpdateKey=*(__unsafe_unretained id *)dynamic;
+    if(animated) animatedUpdateKey=*(__unsafe_unretained id *)animated;
     engine=[[XGTXEngine alloc] initWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration clock:^NSTimeInterval{return NSDate.timeIntervalSinceReferenceDate;} interval:1.0];
     Class helperClass=NSClassFromString(@"T1PostTranslationHelper");
     translationHelper=Object(helperClass,@"shared");
@@ -296,7 +268,6 @@ static void Install(void) {
         [changedKeys addObject:key];
         if(!refreshPending) {refreshPending=YES;dispatch_async(dispatch_get_main_queue(),^{Refresh();});}
     };
-    Replace(statusClass,display,(IMP)GoogleDisplay,(IMP *)&originalDisplay);
     NSUInteger count=0;
     for(NSString *name in @[@"T1StandardStatusView",@"T1ConversationFocalStatusView",@"T1QuotedStandardStatusView"]) {
         Class cls=NSClassFromString(name);if(!cls) continue;
@@ -315,9 +286,6 @@ static void Install(void) {
             if(Replace(cls,selector,hook,NULL)) count++;
         }
     }
-    Class helper=NSClassFromString(@"T1GrokPostTranslationDisplayHelper");
-    for(NSString *method in @[@"shouldDisplayAutoTranslateText",@"shouldDisplayManualTranslateText",@"shouldDisplayAutoTranslateButton",@"shouldDisplayManualTranslateButton"])
-        Replace(helper,NSSelectorFromString(method),(IMP)NeverDisplay,NULL);
     Class access=NSClassFromString(@"_TtC4Grok17GrokFeatureAccess");
     NSUInteger blocked=0;
     for(NSString *method in @[@"isGrokPostAutoTranslationEnabled"])
@@ -327,12 +295,9 @@ static void Install(void) {
     XADLog("OFFICIAL","managed translation gates installed=%lu/2 helper=%d event=%d",(unsigned long)blocked,translationHelper!=nil,eventType!=nil);
     scanTimer=[NSTimer timerWithTimeInterval:0.75 repeats:YES block:^(NSTimer *timer){(void)timer;Tick();}];
     [NSRunLoop.mainRunLoop addTimer:scanTimer forMode:NSRunLoopCommonModes];
-    [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidReceiveMemoryWarningNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note){
-        (void)note;[nativeModels removeAllObjects];XADLog("MEMORY","native render models cleared; successful translations retained");
-    }];
     XADSetSnapshotHandler(Snapshot);installed=YES;
     XADCoreStatus("官方优先，失败自动转 Google；中文跳过；成功结果缓存");
-    XADLog("INSTALL","GTX hooks=%lu nativeDisplay=1 footer=language-translated overlay=0 interval=1s concurrent=2",(unsigned long)count);
+    XADLog("INSTALL","GTX hooks=%lu nativeTranslationWrapper=1 customHint=0 dynamicUpdate=1 interval=1s concurrent=2",(unsigned long)count);
 }
 static atomic_bool scheduled;
 void XATScheduleInitialization(void) {
@@ -340,5 +305,5 @@ void XATScheduleInitialization(void) {
     dispatch_async(dispatch_get_main_queue(),^{Install();});
 }
 __attribute__((constructor)) static void start(void) {
-    XADBootstrap("CONSTRUCTOR_ENTER");XADLog("BOOT","XAutoTranslate v6 OfficialFirst + GoogleGTX loaded");XATScheduleInitialization();
+    XADBootstrap("CONSTRUCTOR_ENTER");XADLog("BOOT","XAutoTranslate v7 OfficialFirst + GoogleGTX loaded");XATScheduleInitialization();
 }

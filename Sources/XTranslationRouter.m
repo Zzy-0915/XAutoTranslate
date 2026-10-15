@@ -55,10 +55,12 @@
 }
 - (BOOL)accept:(XOfficialObservation *)observation job:(XRouteJob *)job {
     if(!observation.result.text.length) return NO;
+    if(!XGTXTranslationChanged(observation.result.text,job.text)) {observation.result=nil;observation.failed=YES;return NO;}
     self.officialSuccesses++;
     if(self.clock()>=self.officialUntil) {self.failures=0;self.officialUntil=0;}
     XADLog("ROUTER","official success key=%.12s officialCooldown=%.1f",job.key.UTF8String,MAX(0,self.officialUntil-self.clock()));
-    [self.engine storeSuccess:job.key text:observation.result.text language:job.language];
+    if([observation.result.language isEqual:@"und"]) observation.result.language=job.language;
+    [self.engine storeResult:job.key result:observation.result];
     return YES;
 }
 - (void)submit:(NSString *)key text:(NSString *)text language:(NSString *)language context:(id)context {

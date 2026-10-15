@@ -6,6 +6,13 @@
 
 @implementation XGTXResult
 @end
+BOOL XGTXTranslationChanged(NSString *translation,NSString *original) {
+    if(!translation.length || !original.length) return NO;
+    NSString *(^normal)(NSString *)=^NSString *(NSString *value){
+        return [[[value precomposedStringWithCanonicalMapping] componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] componentsJoinedByString:@""].lowercaseString;
+    };
+    return ![normal(translation) isEqual:normal(original)];
+}
 
 NSString *XGTXDigest(NSString *text) {
     NSData *data=[text dataUsingEncoding:NSUTF8StringEncoding];
@@ -51,6 +58,7 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
 
 @interface XGTXJob : NSObject
 @property(nonatomic,copy) NSString *key,*language,*token;
+@property(nonatomic,copy) NSString *original;
 @property(nonatomic,copy) NSArray<NSString *> *chunks;
 @property(nonatomic,strong) NSMutableArray<NSString *> *parts;
 @property(nonatomic,strong,nullable) NSURLSessionDataTask *task;
@@ -92,6 +100,11 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
     NSAssert(NSThread.isMainThread,@"main-thread scheduler");
     if(!text.length) return;
     XGTXResult *result=XGTXResult.new;result.text=text;result.language=language;
+    [self storeResult:key result:result];
+}
+- (void)storeResult:(NSString *)key result:(XGTXResult *)result {
+    NSAssert(NSThread.isMainThread,@"main-thread scheduler");
+    if(!result.text.length) return;
     [self.lock lock];BOOL fresh=self.success[key]==nil;
     if(fresh) self.success[key]=result;
     [self.lock unlock];
@@ -103,7 +116,7 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
     if(self.jobs[key]) {self.joined++;return;}
     if(self.failedUntil[key].doubleValue>self.clock()) return;
     if(self.jobs.count>=64) {XADLog("GTX","queue full; visible item deferred");return;}
-    XGTXJob *job=XGTXJob.new;job.key=key;job.language=language;job.token=@"";
+    XGTXJob *job=XGTXJob.new;job.key=key;job.language=language;job.token=@"";job.original=text;
     job.chunks=XGTXChunks(text);job.parts=NSMutableArray.new;
     self.jobs[key]=job;[self.queue addObject:key];[self pump];
 }
@@ -126,6 +139,12 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
     }
 }
 - (void)complete:(XGTXJob *)job {
+    NSString *translated=[job.parts componentsJoinedByString:@""];
+    if(!XGTXTranslationChanged(translated,job.original)) {
+        for(NSString *chunk in job.chunks) [self.segments removeObjectForKey:XGTXDigest(chunk)];
+        self.failedUntil[job.key]=@(self.clock()+60);[self.jobs removeObjectForKey:job.key];
+        XADLog("GTX","unchanged response rejected key=%.12s; not cached or marked translated",job.key.UTF8String);return;
+    }
     [self storeSuccess:job.key text:[job.parts componentsJoinedByString:@""] language:job.language];
     [self.jobs removeObjectForKey:job.key];[self.failedUntil removeObjectForKey:job.key];
     XADLog("GTX","success key=%.12s chunks=%lu cacheEntries=%lu",job.key.UTF8String,(unsigned long)job.chunks.count,(unsigned long)self.success.count);

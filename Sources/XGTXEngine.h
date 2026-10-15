@@ -4,10 +4,12 @@ NS_ASSUME_NONNULL_BEGIN
 @interface XGTXResult : NSObject
 @property(nonatomic,copy) NSString *text;
 @property(nonatomic,copy) NSString *language;
+@property(nonatomic,strong,nullable) id nativeTranslation;
 @end
 
 FOUNDATION_EXPORT NSString *XGTXDigest(NSString *text);
 FOUNDATION_EXPORT BOOL XGTXChinese(NSString *language);
+FOUNDATION_EXPORT BOOL XGTXTranslationChanged(NSString *translation,NSString *original);
 FOUNDATION_EXPORT XGTXResult * _Nullable XGTXParse(NSData *data);
 FOUNDATION_EXPORT NSArray<NSString *> *XGTXChunks(NSString *text);
 
@@ -19,6 +21,7 @@ FOUNDATION_EXPORT NSArray<NSString *> *XGTXChunks(NSString *text);
                              interval:(NSTimeInterval)interval;
 - (nullable XGTXResult *)cached:(NSString *)key;
 - (void)storeSuccess:(NSString *)key text:(NSString *)text language:(NSString *)language;
+- (void)storeResult:(NSString *)key result:(XGTXResult *)result;
 - (void)enqueue:(NSString *)key text:(NSString *)text language:(NSString *)language;
 - (void)keepQueuedKeys:(NSSet<NSString *> *)visibleKeys;
 - (void)pump;
