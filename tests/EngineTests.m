@@ -3,7 +3,6 @@
 #import "XGTXEngine.h"
 #import "XNativeTranslation.h"
 #import "XTranslationRouter.h"
-#import "XDwellGate.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -236,24 +235,6 @@ int main(void) {@autoreleasepool {
     XOfficialObservation *wrong=XOfficialObservation.new;XGTXResult *wrongResult=XGTXResult.new;wrongResult.text=@"OriginalIsNotTranslated";wrongResult.language=@"en";wrong.result=wrongResult;
     [guard submit:@"wrong" text:wrongResult.text language:@"en" context:wrong];[guard tickWithVisibleKeys:[NSSet setWithObject:@"wrong"]];
     Check(![guarded cached:@"wrong"] && Count(@"OriginalIsNotTranslated")==0 && [guard.statistics[@"officialSuccesses"] unsignedIntegerValue]==0,@"unchanged response neither poisons cache nor activates Google without native failure");[guarded invalidate];
-    // Moving, recycled and offscreen views cannot satisfy the dwell policy.
-    now=5000;XDwellGate *gate=[[XDwellGate alloc] initWithClock:^NSTimeInterval{return now;} delay:1.0];NSObject *view=NSObject.new;
-    for(NSUInteger i=0;i<100;i++) {
-        now+=0.02;
-        Check(![gate eligible:view key:[NSString stringWithFormat:@"passed-%lu",(unsigned long)i] visible:YES stationary:NO position:100],@"fast flings never qualify");
-    }
-    Check(![gate eligible:view key:@"read" visible:YES stationary:YES position:100],@"dwell begins when motion stops");
-    now+=0.99;Check(![gate eligible:view key:@"read" visible:YES stationary:YES position:100],@"no premature request");
-    now+=0.02;Check([gate eligible:view key:@"read" visible:YES stationary:YES position:100],@"stable one-second view qualifies");
-    Check(![gate eligible:view key:@"recycled" visible:YES stationary:YES position:100],@"reused cell resets dwell");
-    now+=1.1;Check(![gate eligible:view key:@"recycled" visible:YES stationary:YES position:110],@"programmatic position change resets dwell");
-    now+=1.1;Check([gate eligible:view key:@"recycled" visible:YES stationary:YES position:110],@"stationary programmatic scroll end can qualify");
-    Check(![gate eligible:view key:@"recycled" visible:NO stationary:YES position:110],@"offscreen resets dwell");
-    now+=2;Check(![gate eligible:view key:@"recycled" visible:YES stationary:YES position:110],@"returning view must dwell anew");
-    __weak NSObject *weakView;
-    @autoreleasepool {NSObject *temporary=NSObject.new;weakView=temporary;[gate eligible:temporary key:@"weak" visible:YES stationary:YES position:0];}
-    Check(!weakView,@"dwell metadata does not retain offscreen views");
-
     XGTXEngine *paused=Engine(^NSTimeInterval{return NSDate.timeIntervalSinceReferenceDate;},0);
     [paused setEligibleKeys:NSSet.set];[paused enqueue:@"denied" text:@"MovingDenied" language:@"en"];
     Check(Count(@"MovingDenied")==0,@"paused engine rejects new network jobs");
@@ -262,32 +243,32 @@ int main(void) {@autoreleasepool {
     [paused enqueue:@"drop" text:@"OffscreenQueued" language:@"en"];
     [paused setEligibleKeys:NSSet.set];
     Check(Wait(^BOOL{return [paused cached:@"keep"]!=nil;}),@"already-started result may complete into cache");
-    Check(Count(@"OffscreenQueued")==0,@"completion pump never starts a queued item after scrolling resumes");[paused invalidate];
+    Check(Count(@"OffscreenQueued")==0,@"completion pump never starts a no-longer-visible queued item");[paused invalidate];
     XGTXEngine *live=Engine(^NSTimeInterval{return NSDate.timeIntervalSinceReferenceDate;},0);
     [live setEligibleKeys:[NSSet setWithObject:@"stale-eligible"]];live.admitRequest=^BOOL(NSString *key){(void)key;return NO;};
     [live enqueue:@"stale-eligible" text:@"MovedBetweenTicks" language:@"en"];
-    Check(Count(@"MovedBetweenTicks")==0 && [live.statistics[@"requests"] unsignedIntegerValue]==0,@"live start guard closes the motion/background race between polling ticks");[live invalidate];
+    Check(Count(@"MovedBetweenTicks")==0 && [live.statistics[@"requests"] unsignedIntegerValue]==0,@"live start guard still blocks background or no-longer-visible content");[live invalidate];
 
     now=6000;XGTXEngine *strict=Engine(^NSTimeInterval{return now;},0);__block NSUInteger starts=0;
     XTranslationRouter *policy=[[XTranslationRouter alloc] initWithEngine:strict clock:^NSTimeInterval{return now;} start:^BOOL(id context){(void)context;starts++;return YES;} inspect:^XOfficialObservation *(id context){return context;}];
     XOfficialObservation *pending=XOfficialObservation.new;
     [policy submit:@"passed" text:@"FastPassed" language:@"en" context:pending];[policy tickWithVisibleKeys:NSSet.set];
-    Check(starts==0 && Count(@"FastPassed")==0,@"ineligible queue is removed before either provider starts");
+    Check(starts==0 && Count(@"FastPassed")==0,@"offscreen queue is removed before either provider starts");
     [policy submit:@"read" text:@"StrictReading" language:@"en" context:pending];[policy tickWithVisibleKeys:[NSSet setWithObject:@"read"]];
-    Check(starts==1 && Count(@"StrictReading")==0,@"stable post starts official only");
+    Check(starts==1 && Count(@"StrictReading")==0,@"newly visible post starts official immediately without a dwell timer");
     now=6009;[policy tickWithVisibleKeys:[NSSet setWithObject:@"read"]];Check(Count(@"StrictReading")==0,@"eight-second delay is not a native failure");
     pending.failed=YES;pending.code=60;[policy tickWithVisibleKeys:[NSSet setWithObject:@"read"]];
     Check(Wait(^BOOL{return [strict cached:@"read"]!=nil;}),@"confirmed native failure enables Google automatically");
     XOfficialObservation *next=XOfficialObservation.new;
     [policy submit:@"cooldown-read" text:@"StrictCooldownRead" language:@"en" context:next];
     Check(Count(@"StrictCooldownRead")==0,@"submit itself never issues network even after official failure");
-    [policy tickWithVisibleKeys:NSSet.set];Check(Count(@"StrictCooldownRead")==0,@"cooldown does not translate posts passed during motion");[strict invalidate];
+    [policy tickWithVisibleKeys:NSSet.set];Check(Count(@"StrictCooldownRead")==0,@"cooldown does not start offscreen posts");[strict invalidate];
     XGTXEngine *missing=Engine(^NSTimeInterval{return now;},0);
     XTranslationRouter *unavailable=[[XTranslationRouter alloc] initWithEngine:missing clock:^NSTimeInterval{return now;} start:^BOOL(id context){(void)context;return NO;} inspect:^XOfficialObservation *(id context){return context;}];
     [unavailable submit:@"no-route" text:@"NativeRouteMissing" language:@"en" context:next];[unavailable tickWithVisibleKeys:[NSSet setWithObject:@"no-route"]];
     Check(Count(@"NativeRouteMissing")==0 && [unavailable.statistics[@"fallbacks"] unsignedIntegerValue]==0,@"missing native route never impersonates official failure");[missing invalidate];
     Check(forbiddenInfoInitializers==0,@"all publications avoid the unavailable native initializer");
-    puts("PASS: crash factory regression, stable dwell, fast scrolling/offscreen/reuse, serial requests, paused completion pump, Google only after native failure, no timeout fallback, native translation UI, successful cache and retry controls");
+    puts("PASS: crash factory regression, immediate visible eligibility, serial requests, paused completion pump, Google only after native failure, no timeout fallback, native translation UI, successful cache and retry controls");
 
     return 0;
 }}

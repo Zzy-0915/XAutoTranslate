@@ -85,7 +85,7 @@ static unsigned long fileErrors;
 static int logLock;
 static XADFile *logFile;
 static id coordinator, panel, navigation, segment, textView, exportView, statusLabel, shareButton, timer;
-static char buttonKey;
+static char gestureKey;
 static bool started, visible;
 static void scanWindows(void);
 static bool filesInitialized;
@@ -103,7 +103,7 @@ void XADBootstrap(const char *stage) {
     char path[4096],line[1024];
     struct XADTimeval tv={0};
     gettimeofday(&tv,0);
-    int count=snprintf(line,sizeof(line),"epoch=%ld.%03d pid=%d build=v8 stage=%s\n",tv.seconds,tv.microseconds/1000,getpid(),stage ? stage : "unknown");
+    int count=snprintf(line,sizeof(line),"epoch=%ld.%03d pid=%d build=v9 stage=%s\n",tv.seconds,tv.microseconds/1000,getpid(),stage ? stage : "unknown");
     unsigned long length=count>0 ? (unsigned long)count : 0;
     if(length>=sizeof(line)) length=sizeof(line)-1;
     for(unsigned i=0;i<2;i++) {
@@ -286,7 +286,7 @@ static void verifyPresentation(void *unused) {
     if(!visible || M0(M0(panel,"view"),"window")) return;
     visible=false;
     if(timer) { V0(timer,"invalidate"); objc_release(timer); timer=0; }
-    XADLog("ui","ERROR panel did not attach to a window; log button restored");
+    XADLog("ui","ERROR panel did not attach to a window; two-finger gesture remains available");
     scanWindows();
 }
 static void exportLog(id self, SEL command, id sender) {
@@ -303,7 +303,7 @@ static void exportLog(id self, SEL command, id sender) {
     char *copy = snapshot();
     XADFile *out = copy ? fopen(exportPath,"wb") : 0;
     if (!out) { free(copy); XADLog("export","ERROR cannot create exported log file"); updatePanel(); return; }
-    const char *header = "XAutoTranslate temporary diagnostics v8\nUTC timestamps; no post bodies, account identifiers or request headers recorded.\nStartup is preserved separately (first 64 KiB); current disk segment is at most 2 MiB.\nRepeated startup entries in the current segment are intentional.\n\n--- STARTUP ---\n";
+    const char *header = "XAutoTranslate temporary diagnostics v9\nUTC timestamps; no post bodies, account identifiers or request headers recorded.\nStartup is preserved separately (first 64 KiB); current disk segment is at most 2 MiB.\nRepeated startup entries in the current segment are intentional.\n\n--- STARTUP ---\n";
     unsigned long headerLength = strlen(header), copyLength = strlen(copy);
     bool success = fwrite(header,1,headerLength,out) == headerLength;
     lockLog();
@@ -347,7 +347,7 @@ static void openPanel(id window) {
     if (snapshotHandler) snapshotHandler();
     if (panel) objc_release(panel);
     if (navigation) objc_release(navigation);
-    panel = M0(objc_getClass("XATDiagnosticPanelV4"),"new");
+    panel = M0(objc_getClass("XATDiagnosticPanelV9"),"new");
     if (!panel) { XADLog("ui","ERROR cannot allocate panel"); return; }
     V1(panel,"setTitle:",string("XAutoTranslate 诊断"));
     id view = M0(panel,"view");
@@ -390,50 +390,37 @@ static void openPanel(id window) {
     updatePanel();
     dispatch_after_f(dispatch_time(0,1000000000LL),&_dispatch_main_q,0,verifyPresentation);
 }
-static void logButtonPressed(id self, SEL command, id sender) {
-    (void)self; (void)command;
-    XADLog("button","log button tapped");
-    openPanel(M0(sender,"window"));
-    if (visible) SETBOOL(sender,"setHidden:",true);
+static bool gestureShouldBegin(id self, SEL command, id gesture) {
+    (void)self;(void)command;
+    return !visible && N0(gesture,"numberOfTouches")==2;
+}
+static bool simultaneousGestures(id self, SEL command, id first, id second) {
+    (void)self;(void)command;(void)first;(void)second;return true;
+}
+static void longPress(id self, SEL command, id gesture) {
+    (void)self;(void)command;
+    if(N0(gesture,"state")!=1 || N0(gesture,"numberOfTouches")!=2 || visible) return;
+    XADLog("gesture","two-finger long press recognized after 2 seconds");
+    openPanel(M0(gesture,"view"));
 }
 static void installWindow(id window) {
-    if (!window || !HAS(window,"addSubview:") || !HAS(window,"rootViewController")) return;
-    id button=objc_getAssociatedObject(window,&buttonKey);
+    if(!window || !HAS(window,"addGestureRecognizer:") || !HAS(window,"rootViewController")) return;
+    id gesture=objc_getAssociatedObject(window,&gestureKey);
     bool normal=!HAS(window,"windowLevel") || ((double (*)(id,SEL))objc_msgSend)(window,S("windowLevel"))==0.0;
-    if (!normal || !M0(window,"rootViewController") || B0(window,"isHidden")) {
-        if(button) SETBOOL(button,"setHidden:",true);
-        return;
-    }
-    if (!button) {
-        button=((id (*)(id,SEL,long))objc_msgSend)(objc_getClass("UIButton"),S("buttonWithType:"),1);
-        if(!button) { XADBootstrap("LOG_BUTTON_ALLOCATION_FAILED"); XADLog("button","ERROR cannot allocate log button"); return; }
-        ((void (*)(id,SEL,id,unsigned long))objc_msgSend)(button,S("setTitle:forState:"),string("日志"),0);
-        ((void (*)(id,SEL,id,unsigned long))objc_msgSend)(button,S("setTitleColor:forState:"),color("whiteColor"),0);
-        V1(button,"setBackgroundColor:",color("systemBlueColor"));
-        id font=((id (*)(id,SEL,double))objc_msgSend)(objc_getClass("UIFont"),S("boldSystemFontOfSize:"),14.0);
-        V1(M0(button,"titleLabel"),"setFont:",font);
-        V1(button,"setAccessibilityLabel:",string("打开 X 翻译诊断日志"));
-        V1(button,"setAccessibilityIdentifier:",string("XAutoTranslate.LogButton.v8"));
-        SETLONG(button,"setAutoresizingMask:",1UL|8UL|32UL);
-        id layer=M0(button,"layer");
-        ((void (*)(id,SEL,double))objc_msgSend)(layer,S("setCornerRadius:"),22.0);
-        SETBOOL(layer,"setMasksToBounds:",true);
-        addTarget(button,"xadOpenLog:",1UL<<6);
-        V1(window,"addSubview:",button);
-        objc_setAssociatedObject(window,&buttonKey,button,1);
-        ++attachedWindows;
-        XADBootstrap("LOG_BUTTON_ATTACHED_TO_WINDOW");
-        XADLog("button","visible log button attached to application window");
-    }
-    Rect bounds=((Rect (*)(id,SEL))objc_msgSend)(window,S("bounds"));
-    Insets inset=((Insets (*)(id,SEL))objc_msgSend)(window,S("safeAreaInsets"));
-    double x=bounds.size.width-inset.right-76;
-    double y=inset.top+(bounds.size.height-inset.top-inset.bottom-44)*0.5;
-    if(x<inset.left+4) x=inset.left+4;
-    if(y<inset.top+4) y=inset.top+4;
-    setFrame(button,x,y,64,44);
-    SETBOOL(button,"setHidden:",visible);
-    V1(window,"bringSubviewToFront:",button);
+    bool eligible=normal && M0(window,"rootViewController") && !B0(window,"isHidden");
+    if(!eligible) {if(gesture) SETBOOL(gesture,"setEnabled:",false);return;}
+    if(gesture) {SETBOOL(gesture,"setEnabled:",true);return;}
+    gesture=((id (*)(id,SEL,id,SEL))objc_msgSend)(M0(objc_getClass("UILongPressGestureRecognizer"),"alloc"),S("initWithTarget:action:"),coordinator,S("xadLongPress:"));
+    if(!gesture) {XADBootstrap("LOG_GESTURE_ALLOCATION_FAILED");XADLog("gesture","ERROR cannot allocate log gesture");return;}
+    SETLONG(gesture,"setNumberOfTouchesRequired:",2);
+    ((void (*)(id,SEL,double))objc_msgSend)(gesture,S("setMinimumPressDuration:"),2.0);
+    ((void (*)(id,SEL,double))objc_msgSend)(gesture,S("setAllowableMovement:"),18.0);
+    SETBOOL(gesture,"setCancelsTouchesInView:",false);
+    SETBOOL(gesture,"setDelaysTouchesBegan:",false);SETBOOL(gesture,"setDelaysTouchesEnded:",false);
+    V1(gesture,"setDelegate:",coordinator);
+    V1(window,"addGestureRecognizer:",gesture);objc_setAssociatedObject(window,&gestureKey,gesture,1);objc_release(gesture);
+    ++attachedWindows;XADBootstrap("LOG_GESTURE_ATTACHED_TO_WINDOW");
+    XADLog("gesture","window recognizer attached; touches=2 duration=2s simultaneous=1 visibleButton=0");
 }
 static void scanWindows(void) {
     id app = M0(objc_getClass("UIApplication"),"sharedApplication");
@@ -452,7 +439,7 @@ static void scanWindows(void) {
     if(HAS(app,"keyWindow")) installWindow(M0(app,"keyWindow"));
     id delegate=HAS(app,"delegate") ? M0(app,"delegate") : 0;
     if(HAS(delegate,"window")) installWindow(M0(delegate,"window"));
-    XADLog("button","window scan scenes=%ld attachedTotal=%u",count,attachedWindows);
+    XADLog("gesture","window scan scenes=%ld attachedTotal=%u",count,attachedWindows);
 }
 static void rescanWindows(void *unused) {
     (void)unused;
@@ -466,11 +453,13 @@ static void windowNotification(id self, SEL command, id notification) {
     else scanWindows();
 }
 static bool registerRuntime(void) {
-    Class objectClass = objc_allocateClassPair(objc_getClass("NSObject"),"XATDiagnosticCoordinatorV4",0);
-    Class panelClass = objc_allocateClassPair(objc_getClass("UIViewController"),"XATDiagnosticPanelV4",0);
+    Class objectClass = objc_allocateClassPair(objc_getClass("NSObject"),"XATDiagnosticCoordinatorV9",0);
+    Class panelClass = objc_allocateClassPair(objc_getClass("UIViewController"),"XATDiagnosticPanelV9",0);
     if (!objectClass || !panelClass) { XADBootstrap("UI_CLASS_ALLOCATION_FAILED"); XADLog("ui","ERROR diagnostic runtime class allocation failed (possible duplicate injection)"); return false; }
     bool ok = true;
-    ok &= class_addMethod(objectClass,S("xadOpenLog:"),(IMP)logButtonPressed,"v@:@");
+    ok &= class_addMethod(objectClass,S("xadLongPress:"),(IMP)longPress,"v@:@");
+    ok &= class_addMethod(objectClass,S("gestureRecognizerShouldBegin:"),(IMP)gestureShouldBegin,"B@:@");
+    ok &= class_addMethod(objectClass,S("gestureRecognizer:shouldRecognizeSimultaneouslyWithGestureRecognizer:"),(IMP)simultaneousGestures,"B@:@@");
     ok &= class_addMethod(objectClass,S("xadWindow:"),(IMP)windowNotification,"v@:@");
     ok &= class_addMethod(objectClass,S("xadTick:"),(IMP)tick,"v@:@");
     ok &= class_addMethod(objectClass,S("xadSelection:"),(IMP)selection,"v@:@");
@@ -512,7 +501,7 @@ void XADStart(void) {
     XADBootstrap("DIAGNOSTICS_START_ATTEMPT");
     XADLog("diagnostics","starting temporary diagnostic module; UIKit setup on main thread");
     if(!filesInitialized && objc_getClass("NSFileManager") && objc_getClass("NSString")) { initializeFiles(); filesInitialized=logFile != 0; }
-    bool ready=objc_getClass("NSObject") && objc_getClass("UIViewController") && objc_getClass("UIApplication") && objc_getClass("UIButton");
+    bool ready=objc_getClass("NSObject") && objc_getClass("UIViewController") && objc_getClass("UIApplication") && objc_getClass("UIButton") && objc_getClass("UILongPressGestureRecognizer");
     id app=ready ? M0(objc_getClass("UIApplication"),"sharedApplication") : 0;
     if(!ready || !app) {
         XADLog("ui","waiting for UIKit/application attempt=%u classesReady=%d app=%p",startupAttempts,ready,app);
@@ -530,6 +519,6 @@ void XADStart(void) {
         ((void (*)(id,SEL,id,SEL,id,id))objc_msgSend)(notifications,S("addObserver:selector:name:object:"),coordinator,S("xadWindow:"),string(names[i]),0);
     scanWindows();
     dispatch_after_f(dispatch_time(0,500000000LL),&_dispatch_main_q,0,rescanWindows);
-    XADLog("diagnostics","ready; tap the visible 日志 button on the right side of the screen");
+    XADLog("diagnostics","ready; hold two fingers anywhere in the app window for 2 seconds to open logs");
 }
 #endif

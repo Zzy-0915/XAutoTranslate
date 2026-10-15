@@ -10,7 +10,6 @@
 #import "XGTXEngine.h"
 #import "XNativeTranslation.h"
 #import "XTranslationRouter.h"
-#import "XDwellGate.h"
 
 @interface NSObject (XATNativeEvent)
 - (instancetype)initWithEventType:(id)type statusView:(id)view sourceView:(id)source;
@@ -34,7 +33,6 @@
 
 static XGTXEngine *engine;
 static XTranslationRouter *router;
-static XDwellGate *dwellGate;
 static NSUInteger eligibleCount;
 static id translationHelper,eventType;
 static id (*currentLanguage)(void);
@@ -107,17 +105,8 @@ static BOOL Visible(UIView *view) {
 static XATSource *ViewSource(UIView *view) {
     return Source(Status(Object(view,@"viewModel")));
 }
-static BOOL Stationary(UIView *view) {
-    if(view.window.rootViewController.presentedViewController) return NO;
-    for(UIView *parent=view;parent;parent=parent.superview) if([parent isKindOfClass:UIScrollView.class]) {
-        UIScrollView *scroll=(id)parent;if(scroll.isDragging || scroll.isDecelerating || scroll.isTracking) return NO;
-    }return YES;
-}
 static BOOL Eligible(UIView *view,XATSource *source) {
-    if(!view || !source) return NO;
-    BOOL visible=Visible(view),stationary=visible && Stationary(view);
-    double y=visible ? [view convertRect:view.bounds toView:view.window].origin.y : 0;
-    return [dwellGate eligible:view key:source.key visible:visible stationary:stationary position:y];
+    return view && source && Visible(view) && UIApplication.sharedApplication.applicationState==UIApplicationStateActive && !view.window.rootViewController.presentedViewController;
 }
 static BOOL StartOfficial(XATNativeContext *context) {
     UIView *view=context.view;
@@ -155,13 +144,7 @@ static XOfficialObservation *InspectOfficial(XATNativeContext *context) {
 }
 static void Refresh(void);
 static void Track(UIView *view) {
-    if(!NSThread.isMainThread) return;
-    [views addObject:view];
-    if(!Visible(view) || !Stationary(view)) {
-        [dwellGate reset:view];
-        // Network completions and retry timers must not launch requests during a fling.
-        if(Visible(view) && !Stationary(view)) [engine setEligibleKeys:NSSet.set];
-    }
+    if(NSThread.isMainThread) [views addObject:view];
 }
 static void Refresh(void) {
     refreshPending=NO;
@@ -195,12 +178,10 @@ static void Refresh(void) {
 static void Tick(void) {
     if(UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) {[engine setEligibleKeys:NSSet.set];return;}
     NSMutableSet *eligible=NSMutableSet.new;NSMutableArray<UIView *> *ready=NSMutableArray.new;
-    BOOL moving=NO;
-    for(UIView *view in views.allObjects) if(Visible(view) && !Stationary(view)) {moving=YES;break;}
     for(UIView *view in views.allObjects) {
-        if(moving || !Visible(view)) {[dwellGate reset:view];continue;}
+        if(!Visible(view)) continue;
         XATSource *source=ViewSource(view);
-        if(!source || XGTXChinese(source.language)) {[dwellGate reset:view];continue;}
+        if(!source || XGTXChinese(source.language)) continue;
         if(Eligible(view,source)) {[eligible addObject:source.key];[ready addObject:view];}
     }
     eligibleCount=eligible.count;
@@ -211,7 +192,7 @@ static void Tick(void) {
         NSString *previous=objc_getAssociatedObject(view,&viewKey);
         if(![previous isEqual:source.key]) {
             objc_setAssociatedObject(view,&viewKey,source.key,OBJC_ASSOCIATION_COPY_NONATOMIC);
-            XADLog("DWELL","eligible key=%.12s class=%s stationary>=1s",source.key.UTF8String,NSStringFromClass(view.class).UTF8String);
+            XADLog("FAST","visible key=%.12s class=%s noDwell=1",source.key.UTF8String,NSStringFromClass(view.class).UTF8String);
         }
         XATNativeContext *context=XATNativeContext.new;context.view=view;context.model=Object(view,@"viewModel");context.text=source.text;context.language=source.language;context.key=source.key;context.observedState=-1;
         [router submit:source.key text:source.text language:source.language context:context];
@@ -223,7 +204,7 @@ static void Tick(void) {
     if(changedKeys.count) Refresh();
 }
 static void __attribute__((unused)) Snapshot(void) {
-    XADLog("DWELL","eligible=%lu delay=1s officialConcurrency=1 GoogleConcurrency=1",(unsigned long)eligibleCount);
+    XADLog("FAST","visible=%lu delay=0 officialConcurrency=1 GoogleConcurrency=1",(unsigned long)eligibleCount);
     XADLog("NATIVE","publications=%lu dynamicNotifications=%lu updateKeysReady=%d",(unsigned long)publications,(unsigned long)notifications,dynamicUpdateKey!=nil && animatedUpdateKey!=nil);
     NSDictionary *stats=engine.statistics;
     (void)stats;
@@ -267,7 +248,6 @@ static void Install(void) {
         XADLog("INSTALL","native translation classes not ready attempt=%u",attempts);Retry();return;
     }
     views=NSHashTable.weakObjectsHashTable;changedKeys=NSMutableSet.new;
-    dwellGate=[[XDwellGate alloc] initWithClock:^NSTimeInterval{return NSProcessInfo.processInfo.systemUptime;} delay:1.0];
     void *dynamic=dlsym(RTLD_DEFAULT,"TTAStatusViewCombinedViewModelContainsDynamicContentTypeKey");
     void *animated=dlsym(RTLD_DEFAULT,"TTAStatusViewCombinedViewModelUpdateAnimatedKey");
     if(dynamic) dynamicUpdateKey=*(__unsafe_unretained id *)dynamic;
@@ -277,7 +257,7 @@ static void Install(void) {
     engine.admitRequest=^BOOL(NSString *key){
         if(UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return NO;
         for(UIView *view in views.allObjects) {
-            if(!Visible(view) || !Stationary(view)) continue;
+            if(!Visible(view)) continue;
             XATSource *source=ViewSource(view);
             if([source.key isEqual:key] && Eligible(view,source)) return YES;
         }return NO;
@@ -343,8 +323,8 @@ static void Install(void) {
     scanTimer=[NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *timer){(void)timer;Tick();}];
     [NSRunLoop.mainRunLoop addTimer:scanTimer forMode:NSRunLoopCommonModes];
     XADSetSnapshotHandler(Snapshot);installed=YES;
-    XADCoreStatus("停留1秒后翻译；官方实际失败后启用 Google；中文跳过");
-    XADLog("INSTALL","GTX hooks=%lu nativeTranslationWrapper=1 customHint=0 dynamicUpdate=1 dwell=1s scan=250ms concurrent=1 fallback=confirmed-state2-only",(unsigned long)count);
+    XADCoreStatus("可见内容快速翻译；官方实际失败后启用 Google；中文跳过");
+    XADLog("INSTALL","GTX hooks=%lu nativeTranslationWrapper=1 customHint=0 dynamicUpdate=1 dwell=0 scan=250ms concurrent=1 fallback=confirmed-state2-only",(unsigned long)count);
 }
 static atomic_bool scheduled;
 void XATScheduleInitialization(void) {
@@ -352,5 +332,5 @@ void XATScheduleInitialization(void) {
     dispatch_async(dispatch_get_main_queue(),^{Install();});
 }
 __attribute__((constructor)) static void start(void) {
-    XADBootstrap("CONSTRUCTOR_ENTER");XADLog("BOOT","XAutoTranslate v8 OfficialFirst + GoogleGTX loaded");XATScheduleInitialization();
+    XADBootstrap("CONSTRUCTOR_ENTER");XADLog("BOOT","XAutoTranslate v9 OfficialFirst + GoogleGTX loaded");XATScheduleInitialization();
 }

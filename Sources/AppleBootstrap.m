@@ -5,9 +5,9 @@
 extern void XATScheduleInitialization(void);
 
 // A native ObjC image supplies an independent loader entry; the C side deduplicates it.
-@interface XATAppleBootstrapV8 : NSObject
+@interface XATAppleBootstrapV9 : NSObject
 @end
-@implementation XATAppleBootstrapV8
+@implementation XATAppleBootstrapV9
 + (void)load {
     XADBootstrap("OBJC_LOAD_ENTER");
     XATScheduleInitialization();
