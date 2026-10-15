@@ -1,4 +1,4 @@
-name: Build JailFools Dylib (Foreground Recovery R2)
+name: Build JailFools Dylib (R3 Diagnostics and Export)
 
 on:
   push:
@@ -28,6 +28,7 @@ jobs:
           #import <objc/runtime.h>
           #import <objc/message.h>
           #import <math.h>
+          #import <stdarg.h>
           
           // UI state is accessed on the main thread; network caches are locked.
           static NSMutableDictionary *gHookIMPs;
@@ -50,6 +51,206 @@ jobs:
           static void BeginVisibleDiscovery(void);
           static void ScanTrackedViews(void);
           
+          static NSString *const kDiagnosticVersion=@"R3-Diagnostics";
+          static dispatch_queue_t gLogQueue;
+          static NSString *gLogDirectory;
+          static NSISO8601DateFormatter *gLogClock;
+          static NSUInteger gLogSequence;
+          static char kDiagnosticState, kDiagnosticGesture;
+          static NSDate *gServiceRetryUntil;
+          static NSString *gServiceError;
+          static NSUInteger gServiceFailures;
+          static NSMutableSet *gWaitingForSlot;
+          static NSMutableDictionary *gHookAvailability;
+          static CFTimeInterval gNextRequestTime;
+          
+          static void XLog(NSString *format, ...) NS_FORMAT_FUNCTION(1,2);
+          static void XLog(NSString *format, ...) {
+              if (!gLogQueue) return;
+              va_list args; va_start(args,format);
+              NSString *message=[[NSString alloc] initWithFormat:format arguments:args];
+              va_end(args);
+              NSDate *eventDate=NSDate.date;
+              BOOL mainThread=NSThread.isMainThread;
+              dispatch_async(gLogQueue,^{
+                  @autoreleasepool {
+                      NSString *current=[gLogDirectory stringByAppendingPathComponent:@"current.log"];
+                      NSString *previous=[gLogDirectory stringByAppendingPathComponent:@"previous.log"];
+                      NSFileManager *fm=NSFileManager.defaultManager;
+                      unsigned long long bytes=[[fm attributesOfItemAtPath:current error:NULL] fileSize];
+                      if (bytes>2*1024*1024) {
+                          [fm removeItemAtPath:previous error:NULL];
+                          [fm moveItemAtPath:current toPath:previous error:NULL];
+                      }
+                      if (![fm fileExistsAtPath:current]) [fm createFileAtPath:current contents:nil attributes:nil];
+                      NSString *line=[NSString stringWithFormat:@"%@ #%lu thread=%@ %@\n",[gLogClock stringFromDate:eventDate],(unsigned long)++gLogSequence,mainThread ? @"main" : @"background",message];
+                      NSFileHandle *file=[NSFileHandle fileHandleForWritingAtPath:current];
+                      @try { [file seekToEndOfFile]; [file writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; }
+                      @catch (NSException *exception) { NSLog(@"[XAutoTranslate] log write error: %@",exception.name); }
+                      @finally { [file closeFile]; }
+                  }
+              });
+          }
+          static void InitializeDiagnosticLog(void) {
+              gLogQueue=dispatch_queue_create("XAutoTranslate.diagnostic.log",DISPATCH_QUEUE_SERIAL);
+              NSURL *root=[NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+              NSURL *folder=[root URLByAppendingPathComponent:@"XAutoTranslateLogs" isDirectory:YES];
+              gLogDirectory=folder.path;
+              NSError *error=nil;
+              [NSFileManager.defaultManager createDirectoryAtURL:folder withIntermediateDirectories:YES attributes:nil error:&error];
+              [folder setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:NULL];
+              gLogClock=NSISO8601DateFormatter.new;
+              gLogClock.formatOptions=NSISO8601DateFormatWithInternetDateTime|NSISO8601DateFormatWithFractionalSeconds;
+              XLog(@"SESSION version=%@ app=%@ build=%@ os=%@ logDirectoryReady=%d",kDiagnosticVersion,
+                  [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
+                  [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
+                  NSProcessInfo.processInfo.operatingSystemVersionString,error==nil);
+              XLog(@"CONFIG endpoint=translate.googleapis.com/translate_a/single client=gtx target=zh-CN concurrent=2 startSpacing=1s requestTimeout=20s resourceTimeout=30s watchdog=35s logRotation=2x2MiB");
+              XLog(@"PRIVACY post text, translated text, full URLs, cookies, authorization headers, and credentials are excluded. Native crashes may require a system .ips report.");
+          }
+          static NSString *XPostKey(NSString *tid) {
+              return tid.length ? [NSString stringWithFormat:@"%016lx",(unsigned long)tid.hash] : @"none";
+          }
+          static void XViewEvent(UIView *view, NSString *state, NSString *detail) {
+              NSString *tid=objc_getAssociatedObject(view,&kID);
+              NSString *signature=[NSString stringWithFormat:@"%@:%@",XPostKey(tid),state];
+              if ([objc_getAssociatedObject(view,&kDiagnosticState) isEqualToString:signature]) return;
+              objc_setAssociatedObject(view,&kDiagnosticState,signature,OBJC_ASSOCIATION_COPY_NONATOMIC);
+              XLog(@"VIEW post=%@ class=%@ state=%@ %@",XPostKey(tid),NSStringFromClass(view.class),state,detail ?: @"");
+          }
+          static void DumpDiagnosticState(NSString *reason) {
+              [gLock lock];
+              NSUInteger active=gInFlight.count, cached=gTextCache.count, errors=gErrors.count;
+              NSTimeInterval serviceWait=MAX(0,gServiceRetryUntil.timeIntervalSinceNow);
+              NSArray *pending=gTaskStarted.allKeys;
+              NSMutableArray *ages=NSMutableArray.new;
+              for (NSString *tid in pending) {
+                  [ages addObject:[NSString stringWithFormat:@"%@ age=%.1f",XPostKey(tid),-[(NSDate *)gTaskStarted[tid] timeIntervalSinceNow]]];
+              }
+              [gLock unlock];
+              XLog(@"STATE reason=%@ appState=%ld timerValid=%d tracked=%lu hooks=%lu active=%lu cached=%lu errors=%lu serviceWait=%.1f generation=%lu discovery=%d pending=%@",
+                  reason,(long)UIApplication.sharedApplication.applicationState,gTimer.isValid,
+                  (unsigned long)gViews.allObjects.count,(unsigned long)gHookIMPs.count,(unsigned long)active,
+                  (unsigned long)cached,(unsigned long)errors,serviceWait,(unsigned long)gRecoveryGeneration,gRecovering,ages);
+              for (NSString *key in gHookIMPs.allKeys) {
+                  NSArray *parts=[key componentsSeparatedByString:@"::"];
+                  if (parts.count!=2) continue;
+                  Class cls=NSClassFromString(parts[0]); SEL sel=NSSelectorFromString(parts[1]);
+                  Method method=class_getInstanceMethod(cls,sel);
+                  BOOL matches=method && method_getImplementation(method)==(IMP)[gHookIMPs[key] pointerValue];
+                  XLog(@"HOOK_STATE method=%@ installed=%d",key,matches);
+              }
+          }
+          static UIViewController *DiagnosticPresenter(UIView *source) {
+              UIViewController *controller=source.window.rootViewController;
+              if (!controller) {
+                  for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+                      if (![scene isKindOfClass:UIWindowScene.class] || scene.activationState!=UISceneActivationStateForegroundActive) continue;
+                      for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+                          if (window.isKeyWindow) { controller=window.rootViewController; break; }
+                      }
+                      if (controller) break;
+                  }
+              }
+              while (controller) {
+                  if (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) controller=controller.presentedViewController;
+                  else if ([controller isKindOfClass:UINavigationController.class]) controller=((UINavigationController *)controller).visibleViewController;
+                  else if ([controller isKindOfClass:UITabBarController.class]) controller=((UITabBarController *)controller).selectedViewController;
+                  else break;
+              }
+              return controller;
+          }
+          static void ExportDiagnosticLog(UIViewController *presenter, UIView *source) {
+              DumpDiagnosticState(@"export");
+              dispatch_async(gLogQueue,^{
+                  NSMutableData *snapshot=NSMutableData.new;
+                  [snapshot appendData:[@"XAutoTranslate diagnostic log\nNo post text, credentials or full request URLs.\n\n" dataUsingEncoding:NSUTF8StringEncoding]];
+                  for (NSString *name in @[@"previous.log",@"current.log"]) {
+                      NSData *data=[NSData dataWithContentsOfFile:[gLogDirectory stringByAppendingPathComponent:name]];
+                      if (data.length) {
+                          [snapshot appendData:[[NSString stringWithFormat:@"\n--- %@ ---\n",name] dataUsingEncoding:NSUTF8StringEncoding]];
+                          [snapshot appendData:data];
+                      }
+                  }
+                  NSString *name=[NSString stringWithFormat:@"XAutoTranslate-%@-%lld.log",kDiagnosticVersion,(long long)NSDate.date.timeIntervalSince1970];
+                  NSURL *url=[NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:name]];
+                  NSError *error=nil;
+                  BOOL written=[snapshot writeToURL:url options:NSDataWritingAtomic error:&error];
+                  dispatch_async(dispatch_get_main_queue(),^{
+                      if (!presenter.view.window) return;
+                      if (!written) {
+                          UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"日志导出失败" message:@"无法创建日志文件，请检查可用存储空间。" preferredStyle:UIAlertControllerStyleAlert];
+                          [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
+                          [presenter presentViewController:alert animated:YES completion:nil];
+                          return;
+                      }
+                      UIActivityViewController *share=[[UIActivityViewController alloc] initWithActivityItems:@[url] applicationActivities:nil];
+                      UIView *anchor=source.window ? source : presenter.view;
+                      if (share.popoverPresentationController) {
+                          share.popoverPresentationController.sourceView=anchor;
+                          share.popoverPresentationController.sourceRect=anchor.bounds;
+                      }
+                      [presenter presentViewController:share animated:YES completion:nil];
+                  });
+              });
+          }
+          static void PresentDiagnosticMenu(UIView *source) {
+              UIViewController *presenter=DiagnosticPresenter(source);
+              if (!presenter || [presenter isKindOfClass:UIAlertController.class] || [presenter isKindOfClass:UIActivityViewController.class]) return;
+              XLog(@"DIAGNOSTIC_MENU opened=1 version=%@",kDiagnosticVersion);
+              UIAlertController *menu=[UIAlertController alertControllerWithTitle:[@"翻译诊断 · " stringByAppendingString:kDiagnosticVersion]
+                  message:@"记录请求、HTTP 状态、网络错误、Hook、视图定位、缓存与前后台状态；不记录帖子正文。底层崩溃可能还需要系统 .ips 报告。" preferredStyle:UIAlertControllerStyleAlert];
+              [menu addAction:[UIAlertAction actionWithTitle:@"导出日志" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action){
+                  [presenter dismissViewControllerAnimated:YES completion:^{ ExportDiagnosticLog(presenter,source); }];
+              }]];
+              [menu addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+              [presenter presentViewController:menu animated:YES completion:nil];
+          }
+          @interface XDiagnosticGestureTarget : NSObject <UIGestureRecognizerDelegate>
+          - (void)showLogs:(UILongPressGestureRecognizer *)gesture;
+          @end
+          @implementation XDiagnosticGestureTarget
+          - (void)showLogs:(UILongPressGestureRecognizer *)gesture {
+              if (gesture.state==UIGestureRecognizerStateBegan) PresentDiagnosticMenu(gesture.view);
+          }
+          - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gesture shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other { return YES; }
+          @end
+          static XDiagnosticGestureTarget *gDiagnosticGestures;
+          static void AttachDiagnosticGesture(UIView *view, NSUInteger fingers) {
+              if (objc_getAssociatedObject(view,&kDiagnosticGesture)) return;
+              UILongPressGestureRecognizer *gesture=[[UILongPressGestureRecognizer alloc] initWithTarget:gDiagnosticGestures action:@selector(showLogs:)];
+              gesture.numberOfTouchesRequired=fingers; gesture.minimumPressDuration=1.0;
+              gesture.cancelsTouchesInView=(fingers==1); gesture.delegate=gDiagnosticGestures;
+              [view addGestureRecognizer:gesture];
+              objc_setAssociatedObject(view,&kDiagnosticGesture,gesture,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+          }
+          static NSTimeInterval MetricDuration(NSDate *start, NSDate *end) { return start && end ? [end timeIntervalSinceDate:start] : -1; }
+          @interface XNetworkMetrics : NSObject <NSURLSessionTaskDelegate>
+          @end
+          @implementation XNetworkMetrics
+          - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didFinishCollectingMetrics:(NSURLSessionTaskMetrics *)metrics {
+              XLog(@"METRICS %@ total=%.3f redirects=%lu transactions=%lu",task.taskDescription ?: @"unknown",metrics.taskInterval.duration,(unsigned long)metrics.redirectCount,(unsigned long)metrics.transactionMetrics.count);
+              for (NSURLSessionTaskTransactionMetrics *m in metrics.transactionMetrics) {
+                  XLog(@"NETWORK %@ protocol=%@ reused=%d proxy=%d fetch=%ld dns=%.3f connect=%.3f tls=%.3f response=%.3f",
+                      task.taskDescription ?: @"unknown",m.networkProtocolName ?: @"unknown",m.isReusedConnection,m.isProxyConnection,(long)m.resourceFetchType,
+                      MetricDuration(m.domainLookupStartDate,m.domainLookupEndDate),MetricDuration(m.connectStartDate,m.connectEndDate),
+                      MetricDuration(m.secureConnectionStartDate,m.secureConnectionEndDate),MetricDuration(m.requestStartDate,m.responseEndDate));
+              }
+          }
+          @end
+          static XNetworkMetrics *gNetworkMetrics;
+          static NSTimeInterval RetryAfterSeconds(NSHTTPURLResponse *response) {
+              NSString *value=[response valueForHTTPHeaderField:@"Retry-After"];
+              if (!value.length) return 0;
+              NSScanner *scanner=[NSScanner scannerWithString:value]; double seconds=0;
+              if ([scanner scanDouble:&seconds] && scanner.isAtEnd && isfinite(seconds)) return MAX(0,seconds);
+              NSDateFormatter *formatter=NSDateFormatter.new;
+              formatter.locale=[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+              formatter.timeZone=[NSTimeZone timeZoneForSecondsFromGMT:0];
+              formatter.dateFormat=@"EEE, dd MMM yyyy HH:mm:ss zzz";
+              return MAX(0,[[formatter dateFromString:value] timeIntervalSinceNow]);
+          }
+          
           @interface XTranslationSource : NSObject
           @property(nonatomic, copy) NSString *text;
           @end
@@ -69,6 +270,7 @@ jobs:
               [gLock lock]; BOOL translated=[gTextCache[tid] length]>0;
               if (!translated) { [gRetryAfter removeObjectForKey:tid]; [gErrors removeObjectForKey:tid]; }
               [gLock unlock];
+              XLog(@"USER post=%@ action=%@",XPostKey(tid),translated ? @"toggle-original" : @"retry");
               if (!translated) { InspectAndTranslateView(view); return; }
               if ([gShowOriginal containsObject:tid]) [gShowOriginal removeObject:tid];
               else [gShowOriginal addObject:tid];
@@ -93,7 +295,11 @@ jobs:
               if (!obj || ![obj respondsToSelector:sel]) return nil;
               NSMethodSignature *s = [obj methodSignatureForSelector:sel];
               if (!s || s.numberOfArguments != 2 || s.methodReturnType[0] != '@') return nil;
-              return ((id(*)(id, SEL))objc_msgSend)(obj, sel);
+              @try { return ((id(*)(id, SEL))objc_msgSend)(obj, sel); }
+              @catch (NSException *exception) {
+                  XLog(@"MODEL_EXCEPTION class=%@ selector=%@ name=%@ stack=%@",NSStringFromClass([obj class]),NSStringFromSelector(sel),exception.name,[exception.callStackSymbols componentsJoinedByString:@" | "]);
+                  return nil;
+              }
           }
           static NSString *FriendlyLanguageName(NSString *code) {
               if (![code isKindOfClass:NSString.class] || !code.length) return @"外语";
@@ -278,6 +484,7 @@ jobs:
               if (!button) {
                   button=[[XTranslationButton alloc] initWithFrame:CGRectZero]; button.tag=kStatusTag;
                   button.translationView=view;
+                  AttachDiagnosticGesture(button,1);
                   button.titleLabel.font=[UIFont systemFontOfSize:11 weight:UIFontWeightRegular];
                   [button setTitleColor:UIColor.secondaryLabelColor forState:UIControlStateNormal];
                   button.titleLabel.numberOfLines=1;
@@ -292,10 +499,10 @@ jobs:
               [gLock lock]; NSString *failure=gErrors[tid]; [gLock unlock];
               NSString *title=finished ? (original ? @"原文 · 显示译文" :
                   [NSString stringWithFormat:@"%@ 已翻译 · 查看原文",lang ?: @"外语"]) :
-                  (failure.length ? [failure stringByAppendingString:@" · 重试"] : @"正在翻译…");
+                  (failure.length ? [failure stringByAppendingString:@" · 重试"] :
+                   ([gWaitingForSlot containsObject:tid] ? @"等待翻译…" : @"正在翻译…"));
               if (![button.currentTitle isEqualToString:title]) [button setTitle:title forState:UIControlStateNormal];
-              BOOL enabled=finished || failure.length>0;
-              if (button.enabled!=enabled) button.enabled=enabled;
+              button.enabled=YES; // Keep the log-export long press available in every state.
               button.accessibilityLabel=title;
               LayoutStatus(view);
           }
@@ -322,7 +529,10 @@ jobs:
               if (!view || !text.length || ![objc_getAssociatedObject(view,&kID) isEqualToString:tid]) return;
               UIView *container=FindTweetContainerView(view); NSString *raw=nil;
               UIView *body=FindBodyTextViewInContainer(container,view,&raw);
-              if (!container || !body || body.bounds.size.width<50) return;
+              if (!container || !body || body.bounds.size.width<50) {
+                  XViewEvent(view,@"display.body-not-found",[NSString stringWithFormat:@"container=%@ body=%@",NSStringFromClass(container.class),NSStringFromClass(body.class)]);
+                  return;
+              }
               [gLock lock]; NSString *original=gOriginalCache[tid]; [gLock unlock];
               if (!original.length) original=ExtractModelRawText(objc_getAssociatedObject(view,&kVM)) ?: raw;
               objc_setAssociatedObject(body,&kOriginalBody,original,OBJC_ASSOCIATION_COPY_NONATOMIC);
@@ -349,6 +559,8 @@ jobs:
               BOOL front=count>1 && container.subviews[count-2]==overlay && container.subviews.lastObject==status;
               if (!front) [container bringSubviewToFront:overlay];
               TransformNativeTranslateButton(view,lang,YES);
+              XViewEvent(view,[gShowOriginal containsObject:tid] ? @"display.original" : @"display.translated",
+                  [NSString stringWithFormat:@"body=%@ frame=%@ chars=%lu",NSStringFromClass(body.class),NSStringFromCGRect(frame),(unsigned long)display.length]);
           }
           static BOOL IsViewInViewport(UIView *view) {
               if (!view.window || view.hidden || view.alpha<0.01 || view.bounds.size.width<10 || view.bounds.size.height<5) return NO;
@@ -356,25 +568,51 @@ jobs:
               return CGRectIntersectsRect(CGRectInset(view.window.bounds,0,-100),r);
           }
           static void InspectAndTranslateView(UIView *view) {
-              if (UIApplication.sharedApplication.applicationState!=UIApplicationStateActive || !IsViewInViewport(view)) return;
+              if (UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
+              if (!IsViewInViewport(view)) { XViewEvent(view,@"skip.outside-viewport",@""); return; }
               id vm=objc_getAssociatedObject(view,&kVM); NSString *tid=objc_getAssociatedObject(view,&kID);
-              if (!vm || !tid) return;
+              if (!vm || !tid) { XViewEvent(view,@"skip.missing-binding",vm ? @"missing-id" : @"missing-model"); return; }
               [gLock lock]; NSString *cached=gTextCache[tid], *lang=gLangCache[tid];
               BOOL busy=[gInFlight containsObject:tid]; NSDate *retry=gRetryAfter[tid]; [gLock unlock];
               if (cached.length) { ApplyFallbackOverlay(view,cached,lang,tid); return; }
-              if (busy) { TransformNativeTranslateButton(view,nil,NO); return; }
-              if (retry && retry.timeIntervalSinceNow>0) { TransformNativeTranslateButton(view,nil,NO); return; }
+              if (busy) { XViewEvent(view,@"request.in-flight",@""); TransformNativeTranslateButton(view,nil,NO); return; }
+              [gLock lock];
+              BOOL serviceBlocked=gServiceRetryUntil.timeIntervalSinceNow>0;
+              if (serviceBlocked) gErrors[tid]=gServiceError ?: @"服务等待中";
+              BOOL slotsFull=gInFlight.count>=2 || CACurrentMediaTime()<gNextRequestTime;
+              [gLock unlock];
+              if (serviceBlocked) {
+                  [gWaitingForSlot removeObject:tid];
+                  XViewEvent(view,@"request.service-cooldown",@""); TransformNativeTranslateButton(view,nil,NO); return;
+              }
+              if (retry && retry.timeIntervalSinceNow>0) {
+                  XViewEvent(view,@"request.retry-wait",@""); TransformNativeTranslateButton(view,nil,NO); return;
+              }
+              if (slotsFull) {
+                  [gWaitingForSlot addObject:tid];
+                  [gLock lock]; [gErrors removeObjectForKey:tid]; [gLock unlock];
+                  XViewEvent(view,@"request.queued",@"concurrency-limit=2 start-spacing=1s"); TransformNativeTranslateButton(view,nil,NO); return;
+              }
+              [gWaitingForSlot removeObject:tid];
               NSString *raw=ExtractModelRawText(vm), *viewText=nil;
               UIView *body=FindBodyTextViewInContainer(FindTweetContainerView(view),view,&viewText);
               if (viewText.length>raw.length) raw=viewText;
-              if (!body || !IsValidForeignText(raw)) return;
+              if (!body) { XViewEvent(view,@"skip.body-not-found",@""); return; }
+              if (!IsValidForeignText(raw)) {
+                  XViewEvent(view,@"skip.text-filter",[NSString stringWithFormat:@"modelChars=%lu viewChars=%lu",(unsigned long)raw.length,(unsigned long)viewText.length]); return;
+              }
               NSURLComponents *parts=[NSURLComponents componentsWithString:@"https://translate.googleapis.com/translate_a/single"];
               parts.queryItems=@[[NSURLQueryItem queryItemWithName:@"client" value:@"gtx"],
                   [NSURLQueryItem queryItemWithName:@"sl" value:@"auto"], [NSURLQueryItem queryItemWithName:@"tl" value:@"zh-CN"],
                   [NSURLQueryItem queryItemWithName:@"dt" value:@"t"], [NSURLQueryItem queryItemWithName:@"q" value:raw]];
-              if (!parts.URL) return;
+              if (!parts.URL) { XViewEvent(view,@"request.invalid-url",@""); return; }
               NSString *token=NSUUID.UUID.UUIDString;
+              NSString *correlation=[NSString stringWithFormat:@"post=%@ req=%@",XPostKey(tid),[token substringToIndex:8]];
+              CFTimeInterval requestStarted=CACurrentMediaTime();
+              XLog(@"REQUEST_START %@ endpoint=translate.googleapis.com/translate_a/single method=GET chars=%lu urlBytes=%lu",correlation,(unsigned long)raw.length,(unsigned long)[parts.URL.absoluteString lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+              XViewEvent(view,@"request.started",correlation);
               [gLock lock]; [gInFlight addObject:tid];
+              gNextRequestTime=CACurrentMediaTime()+1.0;
               [gErrors removeObjectForKey:tid];
               gTaskTokens[tid]=token;
               gTaskStarted[tid]=[NSDate date];
@@ -386,8 +624,11 @@ jobs:
               NSURLSessionDataTask *task=[gSession dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
                   NSMutableString *result=NSMutableString.new; NSString *code=nil;
                   NSInteger status=[response isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)response).statusCode : 0;
+                  NSError *parseError=nil;
+                  NSString *shape=@"not-parsed";
                   if (data && !error && status>=200 && status<300) {
-                      id json=[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+                      id json=[NSJSONSerialization JSONObjectWithData:data options:0 error:&parseError];
+                      shape=json ? NSStringFromClass([json class]) : @"invalid-json";
                       if ([json isKindOfClass:NSArray.class] && [json count]>0) {
                           id segments=((NSArray *)json)[0];
                           if ([segments isKindOfClass:NSArray.class]) for (id seg in segments) {
@@ -397,9 +638,20 @@ jobs:
                       }
                   }
                   NSString *friendly=FriendlyLanguageName(code), *translated=[result copy];
+                  NSString *classification=@"none";
+                  if (status>=400 && data.length) {
+                      NSData *prefix=[data subdataWithRange:NSMakeRange(0,MIN((NSUInteger)4096,data.length))];
+                      NSString *sample=[([[NSString alloc] initWithData:prefix encoding:NSUTF8StringEncoding] ?: [[NSString alloc] initWithData:prefix encoding:NSISOLatin1StringEncoding]) lowercaseString];
+                      if ([sample containsString:@"captcha"] || [sample containsString:@"unusual traffic"]) classification=@"challenge-marker";
+                      else if ([sample containsString:@"quota"] || [sample containsString:@"rate limit"]) classification=@"quota-marker";
+                      else if ([sample containsString:@"<html"] || [sample containsString:@"<!doctype"]) classification=@"html-error-page";
+                  }
+                  XLog(@"REQUEST_END %@ HTTP=%ld errorDomain=%@ errorCode=%ld elapsed=%.3f bytes=%lu mime=%@ json=%@ parseCode=%ld outputChars=%lu errorPage=%@ finalHost=%@ underlyingDomain=%@ underlyingCode=%ld",correlation,
+                      (long)status,error.domain ?: @"none",(long)error.code,CACurrentMediaTime()-requestStarted,(unsigned long)data.length,response.MIMEType ?: @"unknown",shape,(long)parseError.code,(unsigned long)translated.length,classification,response.URL.host ?: @"none",[(NSError *)error.userInfo[NSUnderlyingErrorKey] domain] ?: @"none",(long)[(NSError *)error.userInfo[NSUnderlyingErrorKey] code]);
+                  NSTimeInterval retryHeader=[response isKindOfClass:NSHTTPURLResponse.class] ? RetryAfterSeconds((NSHTTPURLResponse *)response) : 0;
                   [gLock lock];
                   // A cancelled pre-background callback must never clear a newer request.
-                  if (![gTaskTokens[tid] isEqualToString:token]) { [gLock unlock]; return; }
+                  if (![gTaskTokens[tid] isEqualToString:token]) { [gLock unlock]; XLog(@"REQUEST_DROP %@ reason=stale-token",correlation); return; }
                   [gInFlight removeObject:tid];
                   [gTasks removeObjectForKey:tid];
                   [gTaskTokens removeObjectForKey:tid];
@@ -410,6 +662,8 @@ jobs:
                       if ([tid hasPrefix:@"text:"]) gFallbackIDs[translated]=tid;
                       [gRetryAfter removeObjectForKey:tid];
                       [gErrors removeObjectForKey:tid]; [gFailures removeObjectForKey:tid];
+                      if (gServiceRetryUntil.timeIntervalSinceNow<=0) { gServiceFailures=0; gServiceError=nil; }
+                      XLog(@"CACHE_STORE %@ inputChars=%lu outputChars=%lu lang=%@",correlation,(unsigned long)raw.length,(unsigned long)translated.length,code ?: @"unknown");
                   } else {
                       NSUInteger failures=MIN([gFailures[tid] unsignedIntegerValue]+1,5);
                       gFailures[tid]=@(failures);
@@ -417,15 +671,25 @@ jobs:
                       NSString *reason=@"翻译失败";
                       if (error.code==NSURLErrorTimedOut) reason=@"请求超时";
                       else if (error) reason=@"连接失败";
-                      else if (status==429 || status==403) { reason=@"服务暂不可用"; delay=60; }
+                      else if (status==403 || status==429) {
+                          reason=status==403 ? @"服务拒绝(403)" : @"请求受限(429)";
+                          gServiceFailures=MIN(gServiceFailures+1,4);
+                          delay=MAX(retryHeader,status==403 ? 300.0 : 60.0*pow(2.0,(double)gServiceFailures-1));
+                          NSDate *until=[NSDate dateWithTimeIntervalSinceNow:delay];
+                          if (!gServiceRetryUntil || [gServiceRetryUntil compare:until]==NSOrderedAscending) gServiceRetryUntil=until;
+                          gServiceError=reason;
+                          XLog(@"SERVICE_COOLDOWN %@ HTTP=%ld wait=%.1f retryAfter=%.1f",correlation,(long)status,delay,retryHeader);
+                      } else if (status==414) { reason=@"文本过长(414)"; delay=300; }
+                      else if (status>=500) reason=[NSString stringWithFormat:@"服务错误(%ld)",(long)status];
+                      else if (!error && status>=200 && status<300) reason=@"响应格式异常";
                       gErrors[tid]=reason;
                       gRetryAfter[tid]=[NSDate dateWithTimeIntervalSinceNow:delay];
-                      NSLog(@"[XAutoTranslate] request failed: HTTP=%ld error=%ld retry=%.0fs",(long)status,(long)error.code,delay);
+                      XLog(@"RETRY %@ wait=%.1f failures=%lu reason=%@",correlation,delay,(unsigned long)failures,reason);
                   }
                   [gLock unlock];
                   dispatch_async(dispatch_get_main_queue(),^{
                       UIView *strong=weakView;
-                      if (!MatchesBinding(strong,tid)) return;
+                      if (!MatchesBinding(strong,tid)) { XLog(@"UI_DROP %@ reason=view-rebound-or-released",correlation); return; }
                       if (translated.length) ApplyFallbackOverlay(strong,translated,friendly,tid);
                       else TransformNativeTranslateButton(strong,nil,NO);
                   });
@@ -434,6 +698,7 @@ jobs:
               BOOL current=[gTaskTokens[tid] isEqualToString:token];
               if (current) gTasks[tid]=task;
               [gLock unlock];
+              task.taskDescription=correlation;
               if (current) [task resume];
               else [task cancel];
           }
@@ -444,12 +709,17 @@ jobs:
               NSString *oldID=objc_getAssociatedObject(view,&kID);
               // A transient nil model is not evidence that the cell belongs to another tweet.
               // Real reuse is handled by prepareForReuse.
-              if (!vm) return;
+              if (!vm) { XViewEvent(view,@"bind.nil-model",@"existing translation retained"); return; }
               NSString *tid=ExtractRealTweetID(vm);
               [gLock lock]; NSString *cached=tid ? gTextCache[tid] : nil; [gLock unlock];
               BOOL sameTweet=oldID && [oldID isEqualToString:tid];
-              if (oldID && !sameTweet) CleanOverlays(FindTweetContainerView(view) ?: view);
+              if (oldID && !sameTweet) {
+                  XLog(@"BIND_REUSE class=%@ old=%@ new=%@",NSStringFromClass(view.class),XPostKey(oldID),XPostKey(tid));
+                  CleanOverlays(FindTweetContainerView(view) ?: view);
+              }
+              if (!sameTweet) XLog(@"BIND post=%@ view=%@ model=%@ inputChars=%lu",XPostKey(tid),NSStringFromClass(view.class),NSStringFromClass([vm class]),(unsigned long)ExtractModelRawText(vm).length);
               if (!sameTweet && !cached.length && !IsForeignTranslatableViewModel(vm)) {
+                  XViewEvent(view,@"bind.filtered",@"language excluded or text rejected by foreign-text filter");
                   ClearStatus(view);
                   objc_setAssociatedObject(view,&kVM,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                   objc_setAssociatedObject(view,&kID,nil,OBJC_ASSOCIATION_COPY_NONATOMIC);
@@ -467,12 +737,14 @@ jobs:
               if (!class_addMethod(cls,sel,replacement,types)) class_replaceMethod(cls,sel,replacement,types);
               NSString *key=[NSString stringWithFormat:@"%@::%@",NSStringFromClass(cls),NSStringFromSelector(sel)];
               gHookIMPs[key]=[NSValue valueWithPointer:(const void *)replacement];
+              XLog(@"HOOK_INSTALL method=%@ encoding=%s",key,types);
           }
           static BOOL BeginHook(Class cls, SEL sel) {
               if (!cls || !class_getInstanceMethod(cls,sel)) return NO;
               NSString *key=[NSString stringWithFormat:@"%@::%@",NSStringFromClass(cls),NSStringFromSelector(sel)];
               NSValue *installed=gHookIMPs[key];
               IMP actual=method_getImplementation(class_getInstanceMethod(cls,sel));
+              if (installed && installed.pointerValue!=(const void *)actual) XLog(@"HOOK_REPLACED method=%@ reinstalling=1",key);
               return !installed || installed.pointerValue!=(const void *)actual;
           }
           static void HookReuse(Class cls) {
@@ -482,9 +754,14 @@ jobs:
               ReplaceMethod(cls,sel,imp_implementationWithBlock(^(UIView *self){ CleanOverlays(self); ((void(*)(id,SEL))original)(self,sel); }),method_getTypeEncoding(m));
           }
           static void HookAdapter(Class cls) {
+              if (!cls) return;
               SEL visible=NSSelectorFromString(@"shouldBeVisibleForViewModel:");
               if (BeginHook(cls,visible)) {
                   Method m=class_getInstanceMethod(cls,visible);
+                  char type[16]={0}; method_getReturnType(m,type,sizeof(type));
+                  if (method_getNumberOfArguments(m)!=3 || (type[0]!='B' && type[0]!='c')) {
+                      XLog(@"HOOK_SKIP class=%@ selector=%@ reason=signature-mismatch encoding=%s",NSStringFromClass(cls),NSStringFromSelector(visible),method_getTypeEncoding(m)); return;
+                  }
                   ReplaceMethod(cls,visible,imp_implementationWithBlock(^BOOL(id self,id vm){ NSString *tid=vm ? ExtractRealTweetID(vm) : nil;
                       [gLock lock]; BOOL locked=tid && [gTextCache objectForKey:tid]!=nil; [gLock unlock];
                       return locked || IsForeignTranslatableViewModel(vm); }),method_getTypeEncoding(m));
@@ -492,6 +769,10 @@ jobs:
               SEL bind=NSSelectorFromString(@"setViewModel:forView:");
               if (BeginHook(cls,bind)) {
                   Method m=class_getInstanceMethod(cls,bind); IMP original=method_getImplementation(m);
+                  char type[16]={0}; method_getReturnType(m,type,sizeof(type));
+                  if (method_getNumberOfArguments(m)!=4 || type[0]!='v') {
+                      XLog(@"HOOK_SKIP class=%@ selector=%@ reason=signature-mismatch encoding=%s",NSStringFromClass(cls),NSStringFromSelector(bind),method_getTypeEncoding(m)); return;
+                  }
                   ReplaceMethod(cls,bind,imp_implementationWithBlock(^(id self,id vm,UIView *view){
                       ((void(*)(id,SEL,id,UIView *))original)(self,bind,vm,view); TrackTranslateView(view,vm);
                   }),method_getTypeEncoding(m));
@@ -499,8 +780,17 @@ jobs:
           }
           static void InstallHooks(void) {
               HookReuse(UITableViewCell.class); HookReuse(UICollectionViewCell.class);
-              HookAdapter(objc_getClass("T1StandardStatusGrokTranslateButtonViewAdapter"));
-              HookAdapter(objc_getClass("T1StandardStatusTranslateAdapter"));
+              for (NSString *name in @[@"T1StandardStatusGrokTranslateButtonViewAdapter",@"T1StandardStatusTranslateAdapter"]) {
+                  Class cls=NSClassFromString(name);
+                  BOOL visible=cls && class_getInstanceMethod(cls,NSSelectorFromString(@"shouldBeVisibleForViewModel:"));
+                  BOOL bind=cls && class_getInstanceMethod(cls,NSSelectorFromString(@"setViewModel:forView:"));
+                  NSNumber *bits=@((cls ? 1 : 0) | (visible ? 2 : 0) | (bind ? 4 : 0));
+                  if (![gHookAvailability[name] isEqual:bits]) {
+                      XLog(@"HOOK_DISCOVER class=%@ present=%d visibleSelector=%d bindSelector=%d",name,cls!=Nil,visible,bind);
+                      gHookAvailability[name]=bits;
+                  }
+                  HookAdapter(cls);
+              }
           }
           // No layoutSubviews hooks. Recovery uses app lifecycle and bounded UI discovery.
           static void CancelPendingRequests(void) {
@@ -510,6 +800,8 @@ jobs:
               [gTaskStarted removeAllObjects]; [gInFlight removeAllObjects];
               [gRetryAfter removeAllObjects]; [gErrors removeAllObjects]; [gFailures removeAllObjects];
               [gLock unlock];
+              [gWaitingForSlot removeAllObjects];
+              XLog(@"REQUEST_CANCEL_ALL count=%lu",(unsigned long)tasks.count);
               for (NSURLSessionDataTask *task in tasks) [task cancel];
           }
           static void ExpireStaleRequests(void) {
@@ -518,6 +810,7 @@ jobs:
               for (NSString *tid in gTaskStarted.allKeys) {
                   NSDate *started=gTaskStarted[tid];
                   if (started.timeIntervalSinceNow > -35.0) continue;
+                  XLog(@"WATCHDOG_EXPIRE post=%@ age=%.1f",XPostKey(tid),-started.timeIntervalSinceNow);
                   NSURLSessionDataTask *task=gTasks[tid];
                   if (task) [cancel addObject:task];
                   [gTasks removeObjectForKey:tid]; [gTaskTokens removeObjectForKey:tid];
@@ -530,10 +823,15 @@ jobs:
           static void ScanTrackedViews(void) {
               if (gEnforcing || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
               gEnforcing=YES;
+              CFTimeInterval scanStarted=CACurrentMediaTime();
               @try {
                   ExpireStaleRequests();
                   for (UIView *view in gViews.allObjects) InspectAndTranslateView(view);
-              } @finally { gEnforcing=NO; }
+              } @finally {
+                  gEnforcing=NO;
+                  double elapsed=CACurrentMediaTime()-scanStarted;
+                  if (elapsed>0.040) XLog(@"PERF_SCAN slowMs=%.1f tracked=%lu",elapsed*1000,(unsigned long)gViews.allObjects.count);
+              }
           }
           static void TryDiscoverTranslateView(UIView *view) {
               if (!view.window || view.tag==kBodyTag || view.tag==kStatusTag) return;
@@ -563,7 +861,8 @@ jobs:
                       XTranslationSource *source=XTranslationSource.new; source.text=raw; vm=source;
                   }
               }
-              if (vm) TrackTranslateView(view,vm);
+              if (vm) { XLog(@"DISCOVERY_BIND view=%@ model=%@",NSStringFromClass(view.class),NSStringFromClass([vm class])); TrackTranslateView(view,vm); }
+              else XViewEvent(view,@"discovery.no-model-or-body",@"");
           }
           static void DiscoverBatch(NSMutableArray<UIView *> *queue, NSUInteger generation, NSUInteger visited) {
               if (generation!=gRecoveryGeneration || UIApplication.sharedApplication.applicationState!=UIApplicationStateActive) return;
@@ -589,6 +888,7 @@ jobs:
                   });
               } else {
                   gRecovering=NO;
+                  XLog(@"DISCOVERY_END visited=%lu remaining=%lu tracked=%lu",(unsigned long)visited,(unsigned long)queue.count,(unsigned long)gViews.allObjects.count);
                   ScanTrackedViews();
               }
           }
@@ -599,16 +899,23 @@ jobs:
               for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
                   if (![scene isKindOfClass:UIWindowScene.class] || scene.activationState!=UISceneActivationStateForegroundActive) continue;
                   for (UIWindow *window in ((UIWindowScene *)scene).windows) {
-                      if (!window.hidden && window.alpha>0.01) [queue addObject:window];
+                      if (!window.hidden && window.alpha>0.01) { AttachDiagnosticGesture(window,2); [queue addObject:window]; }
                   }
               }
+              XLog(@"DISCOVERY_START windows=%lu generation=%lu",(unsigned long)queue.count,(unsigned long)gRecoveryGeneration);
               DiscoverBatch(queue,gRecoveryGeneration,0);
           }
           static void StartForegroundTimer(void) {
               [gTimer invalidate];
               __block NSUInteger ticks=0;
+              __block CFTimeInterval lastTick=CACurrentMediaTime();
+              XLog(@"TIMER_START interval=0.5");
               gTimer=[NSTimer timerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer){
+                  CFTimeInterval now=CACurrentMediaTime();
+                  if (now-lastTick>3) XLog(@"TIMER_GAP seconds=%.3f",now-lastTick);
+                  lastTick=now;
                   ScanTrackedViews();
+                  if (ticks%120==0) DumpDiagnosticState(@"heartbeat");
                   if (++ticks%16==0) { InstallHooks(); BeginVisibleDiscovery(); }
               }];
               [[NSRunLoop mainRunLoop] addTimer:gTimer forMode:NSRunLoopCommonModes];
@@ -618,7 +925,7 @@ jobs:
               gRecoveryGeneration++; gRecovering=NO;
               CancelPendingRequests();
               InstallHooks();
-              NSLog(@"[XAutoTranslate] ForegroundRecovery-R2 active; tracked=%lu",(unsigned long)gViews.allObjects.count);
+              XLog(@"LIFECYCLE active version=%@ tracked=%lu",kDiagnosticVersion,(unsigned long)gViews.allObjects.count);
               StartForegroundTimer();
               ScanTrackedViews();
               BeginVisibleDiscovery();
@@ -632,12 +939,16 @@ jobs:
               }
           }
           static void PauseTranslationEngine(void) {
+              DumpDiagnosticState(@"background");
+              XLog(@"LIFECYCLE background");
               gRecoveryGeneration++; gRecovering=NO;
               [gTimer invalidate]; gTimer=nil;
               CancelPendingRequests();
           }
           __attribute__((constructor)) static void initTweak(void) {
               @autoreleasepool {
+                  InitializeDiagnosticLog();
+                  gWaitingForSlot=NSMutableSet.new; gHookAvailability=NSMutableDictionary.new;
                   gHookIMPs=NSMutableDictionary.new; gInFlight=NSMutableSet.new; gTranslateClasses=NSMutableSet.new;
                   gTextCache=NSMutableDictionary.new; gLangCache=NSMutableDictionary.new; gRetryAfter=NSMutableDictionary.new;
                   gTasks=NSMutableDictionary.new; gTaskTokens=NSMutableDictionary.new; gTaskStarted=NSMutableDictionary.new;
@@ -647,8 +958,10 @@ jobs:
                   NSURLSessionConfiguration *config=NSURLSessionConfiguration.ephemeralSessionConfiguration;
                   config.timeoutIntervalForRequest=20; config.timeoutIntervalForResource=30;
                   config.waitsForConnectivity=NO;
-                  gSession=[NSURLSession sessionWithConfiguration:config];
+                  gNetworkMetrics=XNetworkMetrics.new;
+                  gSession=[NSURLSession sessionWithConfiguration:config delegate:gNetworkMetrics delegateQueue:nil];
                   dispatch_async(dispatch_get_main_queue(),^{
+                      gDiagnosticGestures=XDiagnosticGestureTarget.new;
                       NSNotificationCenter *center=NSNotificationCenter.defaultCenter;
                       [center addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note){
                           PauseTranslationEngine();
@@ -678,6 +991,6 @@ jobs:
       - name: Upload Dylib
         uses: actions/upload-artifact@v4
         with:
-          name: XAutoTranslate-JailFools-ForegroundRecovery-R2
+          name: XAutoTranslate-JailFools-R3-Diagnostics
           path: output/XAutoTranslate.dylib
           if-no-files-found: error
