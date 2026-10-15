@@ -192,6 +192,7 @@ static void Tick(void) {
 }
 static void Snapshot(void) {
     NSDictionary *stats=engine.statistics;
+    (void)stats;
     XADLog("SNAPSHOT","provider=GoogleGTX tracked=%lu bindings=%lu cache=%lu hits=%lu requests=%lu joined=%lu active=%lu queued=%lu throttles=%lu cooldown=%.1f",
         (unsigned long)views.allObjects.count,(unsigned long)bindings,(unsigned long)[stats[@"cache"] unsignedIntegerValue],
         (unsigned long)[stats[@"hits"] unsignedIntegerValue],(unsigned long)[stats[@"requests"] unsignedIntegerValue],(unsigned long)[stats[@"joined"] unsignedIntegerValue],
@@ -256,6 +257,7 @@ static void Install(void) {
     for(NSString *method in @[@"isGrokPostTranslationEnabled",@"isGrokPostAutoTranslationEnabled",@"isGrokPostInlineTranslationEnabled"])
         blocked+=Replace(access,NSSelectorFromString(method),(IMP)NeverDisplay,NULL);
     blocked+=Replace(NSClassFromString(@"T1GrokTranslateEventHandler"),NSSelectorFromString(@"handleStatusViewEvent:controller:"),(IMP)BlockOfficialTranslation,NULL);
+    (void)blocked;(void)count;
     XADLog("OFFICIAL","native translation gates blocked=%lu/4",(unsigned long)blocked);
     scanTimer=[NSTimer timerWithTimeInterval:0.75 repeats:YES block:^(NSTimer *timer){(void)timer;Tick();}];
     [NSRunLoop.mainRunLoop addTimer:scanTimer forMode:NSRunLoopCommonModes];
