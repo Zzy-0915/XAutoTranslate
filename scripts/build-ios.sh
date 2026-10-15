@@ -21,7 +21,7 @@ xcrun --sdk iphoneos clang -arch arm64 -isysroot "$sdk" -miphoneos-version-min=1
   -o "$out/XAutoTranslate-v4.dylib"
 codesign --force --sign - --identifier dev.zzy0915.XAutoTranslate.v4 --timestamp=none "$out/XAutoTranslate-v4.dylib"
 codesign --verify --strict --verbose=2 "$out/XAutoTranslate-v4.dylib"
-xcrun lipo -verify_arch arm64 "$out/XAutoTranslate-v4.dylib"
+xcrun lipo "$out/XAutoTranslate-v4.dylib" -verify_arch arm64
 python3 scripts/verify-dylib.py "$out/XAutoTranslate-v4.dylib" "$diag"
 {
   printf 'commit=%s\ndiagnostics=%s\n' "${GITHUB_SHA:-local}" "$diag"
