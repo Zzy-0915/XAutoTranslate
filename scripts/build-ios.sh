@@ -18,7 +18,7 @@ for file in XAutoTranslate XGTXEngine XGTXNativeDisplay AppleBootstrap; do
 done
 xcrun --sdk iphoneos clang -arch arm64 -isysroot "$sdk" -miphoneos-version-min=17.2 \
   -dynamiclib "$out/objects/XGTXEngine.o" "$out/objects/XGTXNativeDisplay.o" "$out/objects/XAutoTranslate.o" "$out/objects/XDiagnostics.o" "$out/objects/AppleBootstrap.o" \
-  -framework Foundation -framework UIKit -framework NaturalLanguage -lobjc \
+  -framework Foundation -framework UIKit -framework CoreGraphics -framework NaturalLanguage -lobjc \
   -Wl,-no_fixup_chains -Wl,-install_name,@rpath/XAutoTranslate-v5.dylib \
   -o "$out/XAutoTranslate-v5.dylib"
 codesign --force --sign - --identifier dev.zzy0915.XAutoTranslate.v5 --timestamp=none "$out/XAutoTranslate-v5.dylib"
