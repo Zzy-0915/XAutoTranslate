@@ -13,6 +13,7 @@ typedef struct { double x, y; } Point;
 typedef struct { double width, height; } Size;
 typedef struct { Point origin; Size size; } Rect;
 typedef struct { double top, left, bottom, right; } Insets;
+typedef struct { unsigned long location, length; } XADRange;
 struct ObjCSuper { id receiver; Class superclass; };
 extern void objc_msgSend(void);
 extern void objc_msgSendSuper(void);
@@ -235,8 +236,8 @@ static void updatePanel(void) {
             V1(textView,"setText:",string(copy)); free(copy); lastDisplayed = current;
             if (followTail) {
                 unsigned long length = (unsigned long)N0(M0(textView,"text"),"length");
-                struct { unsigned long location,length; } range = {length,0};
-                ((void (*)(id,SEL,typeof(range)))objc_msgSend)(textView,S("scrollRangeToVisible:"),range);
+                XADRange range = {length,0};
+                ((void (*)(id,SEL,XADRange))objc_msgSend)(textView,S("scrollRangeToVisible:"),range);
             } else ((void (*)(id,SEL,Point))objc_msgSend)(textView,S("setContentOffset:"),offset);
         }
     }
