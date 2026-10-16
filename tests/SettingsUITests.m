@@ -151,8 +151,8 @@ static void CheckFeatureAppearance(UITableViewCell *reference,UITableViewCell *m
     }
     UIGraphicsImageRenderer *renderer=[[UIGraphicsImageRenderer alloc] initWithSize:preview.bounds.size];
     UIImage *image=[renderer imageWithActions:^(UIGraphicsImageRendererContext *context){[preview.layer renderInContext:context.CGContext];}];
-    NSString *path=[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject stringByAppendingPathComponent:@"settings-layout-preview.png"];
-    Check([UIImagePNGRepresentation(image) writeToFile:path atomically:YES],"UIKit geometry preview exported");
+    NSString *previewPath=[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject stringByAppendingPathComponent:@"settings-layout-preview.png"];
+    Check([UIImagePNGRepresentation(image) writeToFile:previewPath atomically:YES],"UIKit geometry preview exported");
     puts("PASS feature settings: unified row/label geometry at three widths, single-line summaries, removed introductions, retained controls and native grid/delegates");
 }
 
