@@ -2,8 +2,8 @@
 from pathlib import Path, PurePosixPath
 import gzip,io,sys,tarfile,zipfile
 
-out=Path(sys.argv[1]);source=out/'XAutoTranslate-v13-Inject.zip'
-destination=out/'XAutoTranslate-v13-Inject.deb'
+out=Path(sys.argv[1]);source=out/'XAutoTranslate-v14-Inject.zip'
+destination=out/'XAutoTranslate-v14-Inject.deb'
 with zipfile.ZipFile(source) as z:
     files={name:z.read(name) for name in z.namelist()}
 assert len(files)==27 and sum(name.endswith('.dylib') for name in files)==4
@@ -27,7 +27,7 @@ for name,data in sorted(files.items()):
     installed='Library/MobileSubstrate/DynamicLibraries/'+name if name.endswith('.dylib') else 'Library/Application Support/BHT/'+name
     data_tar+=tar_entry(installed,data)
 data_tar+=b'\0'*1024
-control=('Package: dev.zzy0915.xautotranslate.inject\nVersion: 13.0.0\n'
+control=('Package: dev.zzy0915.xautotranslate.inject\nVersion: 14.0.0\n'
          'Architecture: iphoneos-arm64\nName: XAutoTranslate NFB Injection Bundle\n'
          'Maintainer: Zzy-0915\nSection: Tweaks\n'
          'Description: Import into the app injector; not a system-wide tweak installation.\n').encode()

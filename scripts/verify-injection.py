@@ -41,7 +41,7 @@ assert len(files)==27
 for name,data in files.items():
     assert not name.startswith('/') and '..' not in name.split('/') and '\\' not in name
     if name.endswith('.dylib'):signature(data)
-expected={'XAutoTranslate-v13.dylib','BHTwitter.dylib','XATKit.dylib','libbhFLEX.dylib'}
+expected={'XAutoTranslate-v14.dylib','BHTwitter.dylib','XATKit.dylib','libbhFLEX.dylib'}
 assert {n for n in files if n.endswith('.dylib')}==expected
 graph={}
 for name in sorted(expected):
@@ -55,12 +55,12 @@ for name in sorted(expected):
         elif dep.startswith('@rpath/libswift'):pass
         else:assert dep.startswith(('/usr/lib/','/System/Library/')),(name,dep)
     graph[name]=deps
-assert '@loader_path/BHTwitter.dylib' in graph['XAutoTranslate-v13.dylib']
-assert '@loader_path/libbhFLEX.dylib' in graph['XAutoTranslate-v13.dylib']
+assert '@loader_path/BHTwitter.dylib' in graph['XAutoTranslate-v14.dylib']
+assert '@loader_path/libbhFLEX.dylib' in graph['XAutoTranslate-v14.dylib']
 assert '@loader_path/XATKit.dylib' in graph['BHTwitter.dylib']
 assert 'BHTwitter.bundle/Info.plist' in files and 'BHTwitter.bundle/Acknowledgements.rtf' in files
-assert b'dlopen' not in files['XAutoTranslate-v13.dylib']
-assert b'xatOpenTranslationModule' in files['XAutoTranslate-v13.dylib']
+assert b'dlopen' not in files['XAutoTranslate-v14.dylib']
+assert b'xatOpenTranslationModule' in files['XAutoTranslate-v14.dylib']
 assert plistlib.loads(files['BHTwitter.bundle/Info.plist'])
 print('PASS injection archive: 27 install-time files, four signed libraries, relative dependency closure, resources, no runtime executable extraction or dlopen')
 
@@ -70,6 +70,6 @@ for name,data in files.items():
 for language in ['en','zh_CN']:
     assert b'Zzy-X' in files['BHTwitter.bundle/'+language+'.lproj/Localizable.strings']
 for removed in ['开关改动在完全退出','基于 v10 精简版']:
-    assert removed.encode() not in files['XAutoTranslate-v13.dylib']
-assert b'XATSettingsNavigation' in files['XAutoTranslate-v13.dylib']
-print('PASS v13 display branding, shared native settings cells and removed translation footnotes')
+    assert removed.encode() not in files['XAutoTranslate-v14.dylib']
+assert b'XATSettingsNavigation' in files['XAutoTranslate-v14.dylib']
+print('PASS v14 display branding, shared native settings cells and removed translation footnotes')

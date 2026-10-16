@@ -1,8 +1,8 @@
-# Zzy-X / XAutoTranslate v13
+# Zzy-X / XAutoTranslate v14
 
-本版仅修改设置界面：NFB-X 显示名称改为 Zzy-X；移除主设置页顶部宣传介绍、底部链接/版本卡片，以及自动翻译页两段说明；主设置页改为与自动翻译页相同的 UIKit inset grouped 分组列表，并共用标准 subtitle 单元格与字体字号。原账号副标题保留，主标题使用标准导航字号。
+仅统一各功能子页面的外观，Zzy-X 主页面代码与 v13 相同。常规、高级、推文回复、媒体下载、个人资料、浏览链接、标识定义和实验功能采用与自动翻译页相同的 inset grouped 背景及圆角卡片，标题 17 pt、说明 12 pt，行高随内容自适应。主题、布局及应用图标选择页保留网格、选色、拖拽、保存与恢复操作，统一背景、卡片与文字样式。
 
-保留原设置对象、账号、功能条目、点击处理及所有原功能页面；主设置页视图布局与单元格渲染替换，二级功能控制器不改写。翻译引擎、缓存、官方失败后的 Google 补位和原生译文显示代码与 v12 相同。原作者资源中的致谢文件保留。
+保留原控制器、原单元格类、原标签和开关对象、target/action、标签、菜单及数据更新。只在这些功能页的建表期间改变 table style，不影响 X 其他列表。自动翻译核心与 v13 相同。UIKit 模拟器测试覆盖分组外观及开关身份、回调、标签更新和网格委托保留；全部第三方功能的实机效果仍需用户确认。
 
 推荐交付为已注入 X 12.33（31）的 IPA，包含全部库和资源，安装工具需重新签名。没有从应用数据目录释放或加载可执行库。
 
@@ -12,21 +12,13 @@
 
 用户实机返回 `file system sandbox blocked mmap()`，明确阻止从应用数据容器加载 v11 释放的 libellekit.dylib。代码签名校验不能证明该路径允许执行。
 
-v13 删除可执行库内嵌、运行时解压写入和 dlopen。主 dylib 通过 Mach-O 加载命令依赖同目录 BHTwitter.dylib 和 libbhFLEX.dylib；BHTwitter 依赖同目录 XATKit.dylib（原 ElleKit 的 arm64 文件，修正名称、依赖并临时签名）。使用唯一名称避免被注入器按通用 libellekit 文件名忽略。所有库必须由注入器在安装阶段部署到允许执行的位置，并分别完成所需签名处理；应用启动时不再生成或修改代码文件。
+v14 删除可执行库内嵌、运行时解压写入和 dlopen。主 dylib 通过 Mach-O 加载命令依赖同目录 BHTwitter.dylib 和 libbhFLEX.dylib；BHTwitter 依赖同目录 XATKit.dylib（原 ElleKit 的 arm64 文件，修正名称、依赖并临时签名）。使用唯一名称避免被注入器按通用 libellekit 文件名忽略。所有库必须由注入器在安装阶段部署到允许执行的位置，并分别完成所需签名处理；应用启动时不再生成或修改代码文件。
 
 ## 安装
 
-1. 在 JailFools 的 X 条目移除 v11 和其他旧版 XAutoTranslate，避免重复注入。已独立注入的 BHTwitter/NFB 也先移除。
-2. 完全退出 X。
-3. 在 JailFools 中导入 **XAutoTranslate-v13-Inject.deb 完整注入包**。用户已确认其界面不接受 ZIP，因此提供 DEB；两者包含完全相同的四个 dylib 与 BHTwitter.bundle 资源。DEB 用于注入器导入，不通过 Sileo/包管理器安装到系统。
-4. 注入器应将四个库放在同一可执行目录，并处理每个库的签名。资源可在 X.app 根目录，或与主 dylib 同目录。
-5. 打开 X → 原插件设置 → 自动翻译。默认开启；总开关修改后重启 X 生效。
+交付为已注入的 X 12.33 IPA，包含四个库和完整资源。使用原安装方式重新签名并安装 IPA。安装后打开 X → Zzy-X 设置。不要再叠加注入旧版 XAutoTranslate 或重复的 BHTwitter。
 
-**不能只注入 XAutoTranslate-v13.dylib。** 它有必需的相邻动态库依赖；缺失依赖会导致应用在插件代码执行前加载失败。主 dylib 随附是为完整性检查或手动部署使用，完整 DEB 才是此次交付的注入文件。
-
-DEB 使用标准 ar、control.tar.gz 和 data.tar.gz。布局参考 [TrollFools 公开预处理源码](https://github.com/Lessica/TrollFools/blob/main/TrollFools/InjectorV3%2BPreprocess.swift) 的 DEB 导入实现，显式保留 BHTwitter.bundle 目录条目并验证提取后的内容与已验证 ZIP 逐字节相同。不含维护脚本，也不改变翻译二进制逻辑。本机无法实测 JailFools 5.2.3 的导入结果；不要将依赖复制到应用数据目录后加载。
-
-v11 在 Library/Application Support/XAutoTranslate/Integrated 下释放的旧文件不再被读取。本版不自动删除手机上的目录。
+仓库同时生成依赖完整的 ZIP/DEB 用于构建核验及手动部署，不作为此次安装步骤。主 dylib 不能单独安装。
 
 ## 保留行为
 

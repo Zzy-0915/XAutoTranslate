@@ -49,6 +49,84 @@ static void Check(BOOL condition,const char *message) {if(!condition) {fprintf(s
 - (void)nativeAction {nativeSelections++;UIViewController *child=UIViewController.new;child.title=@"原功能";[self.navigationController pushViewController:child animated:NO];}
 @end
 
+static NSUInteger featureChanges;
+@interface ModernSettingsToggleCell : UITableViewCell
+@property(nonatomic,strong) UILabel *titleLabel;
+@property(nonatomic,strong) UILabel *subtitleLabel;
+@property(nonatomic,strong) UISwitch *toggleSwitch;
+@end
+@implementation ModernSettingsToggleCell
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)identifier {
+    if((self=[super initWithStyle:style reuseIdentifier:identifier])) {
+        self.titleLabel=UILabel.new;self.subtitleLabel=UILabel.new;self.toggleSwitch=UISwitch.new;
+        self.titleLabel.text=@"保留原功能";self.subtitleLabel.text=@"这是一段较长的原有说明，换行后仍然完整显示。";
+        self.titleLabel.font=[UIFont boldSystemFontOfSize:24];self.subtitleLabel.font=[UIFont boldSystemFontOfSize:22];
+        self.toggleSwitch.tag=37;self.toggleSwitch.on=YES;self.toggleSwitch.transform=CGAffineTransformMakeScale(1.3,1.3);
+        for(UIView *view in @[self.titleLabel,self.subtitleLabel,self.toggleSwitch]) [self.contentView addSubview:view];
+    }return self;
+}
+@end
+@interface GeneralSettingsViewController : UIViewController <UITableViewDelegate,UITableViewDataSource>
+@property(nonatomic,strong) UITableView *tableView;
+- (void)setupTable;
+- (void)switchChanged:(UISwitch *)toggle;
+@end
+@implementation GeneralSettingsViewController
+- (void)viewDidLoad {[super viewDidLoad];[self setupTable];}
+- (void)setupTable {
+    self.tableView=[[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStylePlain];
+    self.tableView.delegate=self;self.tableView.dataSource=self;
+    [self.tableView registerClass:ModernSettingsToggleCell.class forCellReuseIdentifier:@"toggle"];
+    [self.view addSubview:self.tableView];
+}
+- (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {(void)table;(void)section;return 1;}
+- (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
+    ModernSettingsToggleCell *cell=[table dequeueReusableCellWithIdentifier:@"toggle" forIndexPath:path];
+    [cell.toggleSwitch addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];return cell;
+}
+- (void)switchChanged:(UISwitch *)toggle {if(toggle.tag==37) featureChanges++;}
+- (CGFloat)tableView:(UITableView *)table heightForRowAtIndexPath:(NSIndexPath *)path {(void)table;(void)path;return 130;}
+@end
+@interface BHCustomTabBarViewController : UIViewController <UICollectionViewDataSource,UICollectionViewDelegate>
+@property(nonatomic,strong) UICollectionView *collectionView;
+@property(nonatomic,strong) UILabel *headerLabel;
+@property(nonatomic,strong) UIButton *restoreButton;
+@end
+@implementation BHCustomTabBarViewController
+- (void)viewDidLoad {
+    [super viewDidLoad];self.headerLabel=UILabel.new;self.headerLabel.text=@"布局调整";self.headerLabel.font=[UIFont boldSystemFontOfSize:24];[self.view addSubview:self.headerLabel];
+    self.restoreButton=[UIButton buttonWithType:UIButtonTypeSystem];[self.restoreButton setTitle:@"恢复默认" forState:UIControlStateNormal];[self.view addSubview:self.restoreButton];
+    self.collectionView=[[UICollectionView alloc] initWithFrame:CGRectMake(20,100,300,300) collectionViewLayout:UICollectionViewFlowLayout.new];
+    self.collectionView.delegate=self;self.collectionView.dataSource=self;[self.collectionView registerClass:UICollectionViewCell.class forCellWithReuseIdentifier:@"item"];[self.view addSubview:self.collectionView];
+}
+- (NSInteger)collectionView:(UICollectionView *)grid numberOfItemsInSection:(NSInteger)section {(void)grid;(void)section;return 4;}
+- (UICollectionViewCell *)collectionView:(UICollectionView *)grid cellForItemAtIndexPath:(NSIndexPath *)path {return [grid dequeueReusableCellWithReuseIdentifier:@"item" forIndexPath:path];}
+- (void)collectionView:(UICollectionView *)grid didSelectItemAtIndexPath:(NSIndexPath *)path {(void)grid;(void)path;}
+@end
+static void CheckFeatureAppearance(UITableViewCell *reference) {
+    GeneralSettingsViewController *controller=GeneralSettingsViewController.new;[controller loadViewIfNeeded];
+    UITableView *table=controller.tableView;
+    Check(table.style==UITableViewStyleInsetGrouped && table.delegate==controller && table.dataSource==controller,"feature grouped table retains original delegates");
+    Check([table.backgroundColor isEqual:UIColor.systemGroupedBackgroundColor],"feature matches translation background");
+    NSIndexPath *path=[NSIndexPath indexPathForRow:0 inSection:0];
+    ModernSettingsToggleCell *cell=(id)[controller tableView:table cellForRowAtIndexPath:path];
+    Check([cell isKindOfClass:ModernSettingsToggleCell.class],"original feature cell class retained for native updates");
+    Check(cell.accessoryView==cell.toggleSwitch && cell.toggleSwitch.on && cell.toggleSwitch.tag==37,"same switch object, value and tag retained");
+    Check(CGAffineTransformIsIdentity(cell.toggleSwitch.transform),"native switch size restored");
+    [cell.toggleSwitch sendActionsForControlEvents:UIControlEventValueChanged];Check(featureChanges==1,"original switch target/action still fires");
+    Check([cell.titleLabel.font.fontDescriptor isEqual:reference.textLabel.font.fontDescriptor] && [cell.subtitleLabel.font.fontDescriptor isEqual:reference.detailTextLabel.font.fontDescriptor],"feature title and detail match translation fonts exactly");
+    cell.subtitleLabel.text=@"原控制器更新说明";[cell setNeedsLayout];[cell layoutIfNeeded];
+    Check([cell.subtitleLabel.text isEqual:@"原控制器更新说明"] && !cell.subtitleLabel.hidden,"native text updates remain visible");
+    Check([controller tableView:table heightForRowAtIndexPath:path]==UITableViewAutomaticDimension,"old fixed row height removed");
+    UITableView *unrelated=[[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    Check(unrelated.style==UITableViewStylePlain,"X tables outside feature setup unaffected");
+    BHCustomTabBarViewController *grid=BHCustomTabBarViewController.new;[grid loadViewIfNeeded];[grid viewDidLayoutSubviews];
+    Check(grid.collectionView.delegate==grid && grid.collectionView.dataSource==grid && [grid collectionView:grid.collectionView numberOfItemsInSection:0]==4,"layout grid and native selection data retained");
+    Check(grid.collectionView.layer.cornerRadius==12 && [grid.collectionView.backgroundColor isEqual:UIColor.secondarySystemGroupedBackgroundColor],"grid rounded card and grouped background");
+    Check(grid.headerLabel.font.pointSize==12 && grid.restoreButton.titleLabel.font.pointSize==17,"grid description and action typography");
+    puts("PASS feature settings: retained cell/control identity, callbacks, dynamic labels, scoped table styles, native grid/delegates");
+}
+
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
 @property(nonatomic,strong) UIWindow *window;
 @end
@@ -85,6 +163,7 @@ static void Check(BOOL condition,const char *message) {if(!condition) {fprintf(s
     Check(feature.textLabel.font.pointSize==details.textLabel.font.pointSize && [feature.textLabel.font.fontDescriptor isEqual:details.textLabel.font.fontDescriptor],"main and translation titles share font and size");
     Check([feature.detailTextLabel.font.fontDescriptor isEqual:details.detailTextLabel.font.fontDescriptor],"main and translation subtitles share font and size");
     Check(![translation tableView:translation.tableView titleForFooterInSection:0] && ![translation tableView:translation.tableView titleForFooterInSection:1],"both highlighted translation footnotes removed");
+    CheckFeatureAppearance(details);
     puts("PASS UIKit settings: grouped layout, shared fonts, all feature rows, original selection/account/lifecycle, Zzy-X branding, removed highlighted regions");fflush(stdout);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(),^{exit(0);});
     });

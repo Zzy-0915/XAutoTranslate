@@ -1,5 +1,6 @@
 #import "XIntegratedPlugin.h"
 #import "XSettingsAppearance.h"
+#import "XFeatureAppearance.h"
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -66,6 +67,7 @@ static void InstallModule(NSString *root) {
         if(!class_addMethod(cls,setup,(IMP)SetupSections,method_getTypeEncoding(method))) method_setImplementation(method,(IMP)SetupSections);
     }
     XATInstallSettingsAppearance(cls);
+    XATInstallFeatureAppearance();
     // Keep the imported optional custom API translator from competing with this module.
     if(XATTranslationEnabled()) {
         Class manager=object_getClass(NSClassFromString(@"BHTManager"));SEL enable=NSSelectorFromString(@"enableTranslate");
@@ -100,7 +102,7 @@ void XATPrepareIntegratedPlugin(void) {
         }
         if(!root && [NSBundle.mainBundle URLForResource:@"BHTwitter" withExtension:@"bundle"]) root=NSBundle.mainBundle.bundlePath;
         if(NSClassFromString(@"ModernSettingsViewController") && root) InstallModule(root);
-        else integrationFailure=@"原插件或资源缺失。请移除 v11，并通过注入器导入 v13 完整注入包，不能只导入主 dylib。";
+        else integrationFailure=@"原插件或资源缺失。请移除 v11，并通过注入器导入 v14 完整注入包，不能只导入主 dylib。";
         if(integrationFailure) {
             [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note){(void)note;ShowFailure();}];
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ShowFailure();});
