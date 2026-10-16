@@ -61,6 +61,8 @@ static void Check(BOOL condition,const char *message) {if(!condition) {fprintf(s
     id account=NSObject.new;ModernSettingsViewController *root=[[ModernSettingsViewController alloc] initWithAccount:account];
     UINavigationController *navigation=[[UINavigationController alloc] initWithRootViewController:root];
     self.window=[[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];self.window.rootViewController=navigation;[self.window makeKeyAndVisible];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(),^{
+    [UIView setAnimationsEnabled:NO];
     [root loadViewIfNeeded];
     Check(nativeLoads==1 && footerCreations==0,"native lifecycle retained, footer builder suppressed");
     Check(root.account==account && [root.title isEqual:@"Zzy-X"],"account retained and title renamed");
@@ -73,9 +75,11 @@ static void Check(BOOL condition,const char *message) {if(!condition) {fprintf(s
     Check([feature.textLabel.text isEqual:@"常规功能"] && feature.accessoryType==UITableViewCellAccessoryDisclosureIndicator,"feature label and navigation affordance");
     [root tableView:root.tableView didSelectRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0]];
     Check(nativeSelections==1 && navigation.viewControllers.count==2 && root.account==account,"original action still opens original feature");
-    [navigation popViewControllerAnimated:NO];
+    [navigation setViewControllers:@[root] animated:NO];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(),^{
     [root tableView:root.tableView didSelectRowAtIndexPath:[NSIndexPath indexPathForRow:8 inSection:0]];
     UITableViewController *translation=(UITableViewController *)navigation.topViewController;[translation loadViewIfNeeded];
+    printf("UIKit route: class=%s title=%s style=%ld stack=%lu\n",NSStringFromClass(translation.class).UTF8String,translation.title.UTF8String,(long)translation.tableView.style,(unsigned long)navigation.viewControllers.count);fflush(stdout);
     Check([translation.title isEqual:@"自动翻译"] && translation.tableView.style==UITableViewStyleInsetGrouped,"translation module remains reachable");
     UITableViewCell *details=[translation tableView:translation.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:1]];
     Check(feature.textLabel.font.pointSize==details.textLabel.font.pointSize && [feature.textLabel.font.fontDescriptor isEqual:details.textLabel.font.fontDescriptor],"main and translation titles share font and size");
@@ -83,7 +87,10 @@ static void Check(BOOL condition,const char *message) {if(!condition) {fprintf(s
     Check(![translation tableView:translation.tableView titleForFooterInSection:0] && ![translation tableView:translation.tableView titleForFooterInSection:1],"both highlighted translation footnotes removed");
     puts("PASS UIKit settings: grouped layout, shared fonts, all feature rows, original selection/account/lifecycle, Zzy-X branding, removed highlighted regions");fflush(stdout);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(),^{exit(0);});
+    });
+    });
     return YES;
 }
 @end
 int main(int argc,char **argv) {@autoreleasepool {return UIApplicationMain(argc,argv,nil,NSStringFromClass(AppDelegate.class));}}
+
