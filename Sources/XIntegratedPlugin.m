@@ -1,4 +1,5 @@
 #import "XIntegratedPlugin.h"
+#import "XSettingsAppearance.h"
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -20,10 +21,10 @@ BOOL XATTranslationEnabled(void) {
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)table {(void)table;return 2;}
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {(void)table;return section==0 ? 1 : 3;}
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
-    (void)table;return section==0 ? @"开关改动在完全退出并重新打开 X 后生效。默认开启，中文不翻译。" : @"基于 v10 精简版。翻译缓存仅保留至本次进程结束。Google 补位会发送待翻译文本，仍可能限流。";
+    (void)table;(void)section;return nil;
 }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
-    (void)table;UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+    UITableViewCell *cell=XATSettingsCell(table,@"XATTranslationSetting");
     cell.selectionStyle=UITableViewCellSelectionStyleNone;cell.textLabel.numberOfLines=0;cell.detailTextLabel.numberOfLines=0;
     if(path.section==0) {
         cell.textLabel.text=@"自动翻译推文和评论";
@@ -64,6 +65,7 @@ static void InstallModule(NSString *root) {
         originalSections=(void (*)(id,SEL))method_getImplementation(method);
         if(!class_addMethod(cls,setup,(IMP)SetupSections,method_getTypeEncoding(method))) method_setImplementation(method,(IMP)SetupSections);
     }
+    XATInstallSettingsAppearance(cls);
     // Keep the imported optional custom API translator from competing with this module.
     if(XATTranslationEnabled()) {
         Class manager=object_getClass(NSClassFromString(@"BHTManager"));SEL enable=NSSelectorFromString(@"enableTranslate");
@@ -98,7 +100,7 @@ void XATPrepareIntegratedPlugin(void) {
         }
         if(!root && [NSBundle.mainBundle URLForResource:@"BHTwitter" withExtension:@"bundle"]) root=NSBundle.mainBundle.bundlePath;
         if(NSClassFromString(@"ModernSettingsViewController") && root) InstallModule(root);
-        else integrationFailure=@"原插件或资源缺失。请移除 v11，并通过注入器导入 v12 完整注入包，不能只导入主 dylib。";
+        else integrationFailure=@"原插件或资源缺失。请移除 v11，并通过注入器导入 v13 完整注入包，不能只导入主 dylib。";
         if(integrationFailure) {
             [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note){(void)note;ShowFailure();}];
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ShowFailure();});

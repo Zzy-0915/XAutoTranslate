@@ -31,6 +31,10 @@ if '--verify-only' in sys.argv:
 out=root/'output'; staging=out/'vendor';staging.mkdir(parents=True,exist_ok=True)
 for name,data in files.items():
     path=staging/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(data)
+# Change display branding only; preserve localization keys, feature text and credits.
+for strings in (staging/'BHTwitter.bundle').rglob('*.strings'):
+    content=strings.read_text(encoding='utf-8-sig')
+    strings.write_bytes(content.replace('NFB-X','Zzy-X').encode('utf-8'))
 kit=staging/'XATKit.dylib'
 (staging/'libellekit.dylib').rename(kit)
 subprocess.run(['install_name_tool','-id','@rpath/XATKit.dylib',str(kit)],check=True)
