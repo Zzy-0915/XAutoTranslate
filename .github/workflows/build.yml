@@ -30,6 +30,7 @@ jobs:
           path: |
             output/XAutoTranslate-v12.dylib
             output/XAutoTranslate-v12-Inject.zip
+            output/XAutoTranslate-v12-Inject.deb
             output/build-info.txt
             output/README.md
           if-no-files-found: error

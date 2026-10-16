@@ -34,3 +34,4 @@ python3 scripts/package-injection.py "$out"
 cp README.md "$out/README.md"
 
 python3 scripts/verify-injection.py "$out/XAutoTranslate-v12-Inject.zip"
+python3 scripts/package-deb.py "$out"
