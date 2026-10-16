@@ -7,6 +7,16 @@
 // targets, menus, tags, model updates and collection/drag delegates remain native.
 static _Thread_local unsigned tableConstruction;
 static char adaptedKey;
+@interface UITableView (XATFeatureConstruction)
+- (instancetype)xat_featureInitWithFrame:(CGRect)frame style:(UITableViewStyle)style __attribute__((objc_method_family(init)));
+@end
+@implementation UITableView (XATFeatureConstruction)
+- (instancetype)xat_featureInitWithFrame:(CGRect)frame style:(UITableViewStyle)style {
+    // The alias has the init ownership convention, including consumed self.
+    // After exchange this invokes UIKit's original designated initializer.
+    return [self xat_featureInitWithFrame:frame style:tableConstruction ? UITableViewStyleInsetGrouped : style];
+}
+@end
 static id Get(id object,NSString *name) {
     SEL selector=NSSelectorFromString(name);
     return [object respondsToSelector:selector] ? ((id (*)(id,SEL))objc_msgSend)(object,selector) : nil;
@@ -147,11 +157,8 @@ static void StyleGrid(UIViewController *controller) {
 }
 void XATInstallFeatureAppearance(void) {
     static dispatch_once_t once;dispatch_once(&once,^{
-        SEL init=@selector(initWithFrame:style:);Method method=class_getInstanceMethod(UITableView.class,init);
-        id (*initialize)(id,SEL,CGRect,UITableViewStyle)=(void *)method_getImplementation(method);
-        Replace(UITableView.class,init,imp_implementationWithBlock(^id(id table,CGRect frame,UITableViewStyle style){
-            return initialize(table,init,frame,tableConstruction ? UITableViewStyleInsetGrouped : style);
-        }));
+        method_exchangeImplementations(class_getInstanceMethod(UITableView.class,@selector(initWithFrame:style:)),
+            class_getInstanceMethod(UITableView.class,@selector(xat_featureInitWithFrame:style:)));
         for(NSString *name in @[@"ModernSettingsTableViewCell",@"ModernSettingsSimpleButtonCell",@"ModernSettingsCompactButtonCell",@"ModernSettingsToggleCell"]) {
             Class cls=NSClassFromString(name);SEL layout=@selector(layoutSubviews);Method layoutMethod=class_getInstanceMethod(cls,layout);
             if(!layoutMethod) continue;
