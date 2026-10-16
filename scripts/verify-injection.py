@@ -1,7 +1,6 @@
-"""Inspect the actual release's embedded signed files without executing them."""
-import hashlib,plistlib,struct,sys,zlib
+"""Verify the real installable archive, dependency closure and signed Mach-O bytes."""
+import hashlib,struct,sys,zipfile,plistlib
 from pathlib import Path
-
 def sections(b):
     assert struct.unpack_from('<I',b)[0]==0xfeedfacf
     assert struct.unpack_from('<I',b,4)[0]==0x100000c
@@ -35,19 +34,32 @@ def signature(b):
         checked+=1
     assert checked
 
-b=Path(sys.argv[1]).read_bytes();s,_=sections(b);signature(b)
-manifest=plistlib.loads(s['__xat_manifest']);compressed=s['__xat_payload']
-assert hashlib.sha256(compressed).hexdigest()==manifest['payloadSHA256']
-raw=zlib.decompress(compressed);assert len(raw)==manifest['uncompressedSize']
-files=plistlib.loads(raw);assert set(files)==set(manifest['files'])
+
+with zipfile.ZipFile(sys.argv[1]) as z:
+    files={name:z.read(name) for name in z.namelist()}
+assert len(files)==27
 for name,data in files.items():
     assert not name.startswith('/') and '..' not in name.split('/') and '\\' not in name
-    expected=manifest['files'][name]
-    assert len(data)==expected['size'] and hashlib.sha256(data).hexdigest()==expected['sha256']
     if name.endswith('.dylib'):signature(data)
-assert b'@loader_path/libellekit.dylib' in files['BHTwitter.dylib']
-assert b'@executable_path/Frameworks/libellekit.dylib' not in files['BHTwitter.dylib']
+expected={'XAutoTranslate-v12.dylib','BHTwitter.dylib','XATKit.dylib','libbhFLEX.dylib'}
+assert {n for n in files if n.endswith('.dylib')}==expected
+graph={}
+for name in sorted(expected):
+    b=files[name];s,commands=sections(b);assert '__xat_payload' not in s and '__xat_manifest' not in s
+    deps=[]
+    for cmd,p in commands:
+        if cmd not in [0xc,0x80000018,0x8000001f]:continue
+        start=p+struct.unpack_from('<I',b,p+8)[0];dep=b[start:b.index(0,start)].decode();deps.append(dep)
+        if dep.startswith('@loader_path/'):
+            assert dep.removeprefix('@loader_path/') in files,(name,dep)
+        elif dep.startswith('@rpath/libswift'):pass
+        else:assert dep.startswith(('/usr/lib/','/System/Library/')),(name,dep)
+    graph[name]=deps
+assert '@loader_path/BHTwitter.dylib' in graph['XAutoTranslate-v12.dylib']
+assert '@loader_path/libbhFLEX.dylib' in graph['XAutoTranslate-v12.dylib']
+assert '@loader_path/XATKit.dylib' in graph['BHTwitter.dylib']
 assert 'BHTwitter.bundle/Info.plist' in files and 'BHTwitter.bundle/Acknowledgements.rtf' in files
-for token in [b'XATTranslationModuleController',b'xatOpenTranslationModule',b'setupSections',b'dlopen',b'__xat_manifest']:
-    assert token in b,token
-print('PASS integrated release:',len(files),'embedded files, SHA256, nested signature pages, relative ElleKit dependency, settings module')
+assert b'dlopen' not in files['XAutoTranslate-v12.dylib']
+assert b'xatOpenTranslationModule' in files['XAutoTranslate-v12.dylib']
+assert plistlib.loads(files['BHTwitter.bundle/Info.plist'])
+print('PASS injection archive: 27 install-time files, four signed libraries, relative dependency closure, resources, no runtime executable extraction or dlopen')

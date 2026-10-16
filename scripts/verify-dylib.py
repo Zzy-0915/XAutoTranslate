@@ -37,9 +37,9 @@ for _ in range(u32(16)):
     elif cmd==0x32:
         assert u32(p+8)==2 and u32(p+12)<=0x110200
     p+=size
-assert identity=='@rpath/XAutoTranslate-v11.dylib'
+assert identity=='@rpath/XAutoTranslate-v12.dylib'
 assert signature and '__objc_imageinfo' in sections and '__objc_nlclslist' in sections
-assert b'XATAppleBootstrapV11' in b and '_XATScheduleInitialization' in symbols
+assert b'XATAppleBootstrapV12' in b and '_XATScheduleInitialization' in symbols
 _,init_size,init_offset=sections['__mod_init_func']
 assert init_size>=8
 assert symbols['_start'] in [u64(init_offset+i) for i in range(0,init_size,8)]
@@ -75,3 +75,6 @@ assert b"getOrCreateInfoFor:" in b
 
 print('PASS arm64/iOS clean dylib: native loaders, signature pages, translation bridge, no translation diagnostics')
 print(hashlib.sha256(b).hexdigest(),path.name)
+
+assert b'__xat_payload' not in b and b'__xat_manifest' not in b
+assert b'_dlopen' not in symbols and b'dlopen' not in b

@@ -26,9 +26,10 @@ jobs:
       - name: Upload verified dylib
         uses: actions/upload-artifact@v4
         with:
-          name: XAutoTranslate-v11-X12.33-${{ github.run_number }}
+          name: XAutoTranslate-v12-X12.33-${{ github.run_number }}
           path: |
-            output/XAutoTranslate-v11.dylib
+            output/XAutoTranslate-v12.dylib
+            output/XAutoTranslate-v12-Inject.zip
             output/build-info.txt
             output/README.md
           if-no-files-found: error
