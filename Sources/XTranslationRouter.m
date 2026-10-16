@@ -1,5 +1,4 @@
 #import "XTranslationRouter.h"
-#include "XDiagnostics.h"
 #include <math.h>
 @implementation XOfficialObservation
 @end
@@ -21,7 +20,7 @@
 @property(nonatomic,copy) BOOL (^start)(id);
 @property(nonatomic,copy) XOfficialObservation *(^inspect)(id);
 @property(nonatomic) NSTimeInterval officialUntil,nextStart;
-@property(nonatomic) NSUInteger failures,officialStarts,officialSuccesses,fallbacks,deferrals;
+@property(nonatomic) NSUInteger failures;
 @end
 @implementation XTranslationRouter
 - (instancetype)initWithEngine:(XGTXEngine *)engine clock:(NSTimeInterval (^)(void))clock start:(BOOL (^)(id))start inspect:(XOfficialObservation *(^)(id))inspect {
@@ -37,31 +36,27 @@
     }return self;
 }
 - (void)remove:(XRouteJob *)job {[self.jobs removeObjectForKey:job.key];[self.order removeObject:job.key];}
-- (void)defer:(XRouteJob *)job reason:(const char *)reason {
-    (void)reason;self.deferrals++;self.retryAfter[job.key]=@(self.clock()+60);[self remove:job];
-    XADLog("ROUTER","official deferred key=%.12s reason=%s googleEnabled=0",job.key.UTF8String,reason);
+- (void)defer:(XRouteJob *)job {
+    self.retryAfter[job.key]=@(self.clock()+60);[self remove:job];
 }
-- (void)google:(XRouteJob *)job eligible:(NSSet<NSString *> *)eligible reason:(const char *)reason {
-    (void)reason;[self remove:job];
-    if(![self.googleKeys containsObject:job.key]) {
-        self.fallbacks++;[self.googleKeys addObject:job.key];
-        XADLog("ROUTER","fallback key=%.12s from=official to=GoogleGTX reason=%s",job.key.UTF8String,reason);
-    }
+- (void)google:(XRouteJob *)job eligible:(NSSet<NSString *> *)eligible {
+    [self remove:job];
+    [self.googleKeys addObject:job.key];
     if([eligible containsObject:job.key]) [self.engine enqueue:job.key text:job.text language:job.language];
 }
-- (void)officialFailed:(XRouteJob *)job code:(NSInteger)code eligible:(NSSet<NSString *> *)eligible {
-    (void)code;self.failures++;
+- (void)officialFailed:(XRouteJob *)job eligible:(NSSet<NSString *> *)eligible {
+    self.failures++;
     NSTimeInterval delay=MIN(900,300*pow(2,MIN(self.failures-1,2)));
     self.officialUntil=MAX(self.officialUntil,self.clock()+delay);
-    XADLog("ROUTER","official failure state=2 code=%ld wait=%.0f googleEnabled=1",(long)code,delay);
-    [self google:job eligible:eligible reason:"confirmed native failure state=2"];
+
+    [self google:job eligible:eligible];
 }
 - (BOOL)accept:(XOfficialObservation *)observation job:(XRouteJob *)job {
     if(!observation.result.text.length) return NO;
     if(!XGTXTranslationChanged(observation.result.text,job.text)) {observation.result=nil;observation.unavailable=YES;return NO;}
-    self.officialSuccesses++;
+
     if(self.clock()>=self.officialUntil) {self.failures=0;self.officialUntil=0;}
-    XADLog("ROUTER","official success key=%.12s officialCooldown=%.1f",job.key.UTF8String,MAX(0,self.officialUntil-self.clock()));
+
     if([observation.result.language isEqual:@"und"]) observation.result.language=job.language;
     [self.engine storeResult:job.key result:observation.result];return YES;
 }
@@ -85,31 +80,26 @@
         if(!job.started) continue;
         XOfficialObservation *observation=self.inspect(job.context);
         if([self accept:observation job:job]) continue;
-        if(observation.failed) {[self officialFailed:job code:observation.code eligible:eligible];continue;}
-        if(observation.unavailable) {[self defer:job reason:"native unavailable or result invalid"];continue;}
-        if(now-job.began>=30) [self defer:job reason:"30s without official failure; Google not started"];
+        if(observation.failed) {[self officialFailed:job eligible:eligible];continue;}
+        if(observation.unavailable) {[self defer:job];continue;}
+        if(now-job.began>=30) [self defer:job];
     }
     NSUInteger active=0;for(XRouteJob *job in self.jobs.allValues) if(job.started) active++;
     for(NSString *key in self.order.array) {
         XRouteJob *job=self.jobs[key];if(!job || job.started || ![eligible containsObject:key]) continue;
-        if([self.googleKeys containsObject:key] || now<self.officialUntil) {[self google:job eligible:eligible reason:"confirmed official failure cooldown"];continue;}
+        if([self.googleKeys containsObject:key] || now<self.officialUntil) {[self google:job eligible:eligible];continue;}
         XOfficialObservation *observation=self.inspect(job.context);
         if([self accept:observation job:job]) continue;
-        if(observation.failed) {[self officialFailed:job code:observation.code eligible:eligible];continue;}
-        if(observation.unavailable) {[self defer:job reason:"native unavailable or result invalid"];continue;}
+        if(observation.failed) {[self officialFailed:job eligible:eligible];continue;}
+        if(observation.unavailable) {[self defer:job];continue;}
         if(active>=1 || now<self.nextStart) continue;
         job.started=YES;job.began=now;self.nextStart=now+1.5;
         if(!observation.inFlight) {
-            if(!self.start(job.context)) {[self defer:job reason:"view changed or native route unavailable"];continue;}
-            self.officialStarts++;
+            if(!self.start(job.context)) {[self defer:job];continue;}
         }
         active++;
-        XADLog("ROUTER","official pending key=%.12s active=1 probe=%d",key.UTF8String,self.failures>0);
     }
     [self.engine pump];
 }
-- (NSDictionary<NSString *,NSNumber *> *)statistics {
-    return @{@"officialStarts":@(self.officialStarts),@"officialSuccesses":@(self.officialSuccesses),@"fallbacks":@(self.fallbacks),
-        @"officialCooldown":@(MAX(0,self.officialUntil-self.clock())),@"officialPending":@(self.jobs.count),@"deferrals":@(self.deferrals)};
-}
+
 @end

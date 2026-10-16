@@ -6,7 +6,6 @@ import sys
 
 path=pathlib.Path(sys.argv[1])
 b=path.read_bytes()
-diagnostics=int(sys.argv[2])
 u32=lambda p:struct.unpack_from('<I',b,p)[0]
 u64=lambda p:struct.unpack_from('<Q',b,p)[0]
 def cstr(p):
@@ -38,16 +37,17 @@ for _ in range(u32(16)):
     elif cmd==0x32:
         assert u32(p+8)==2 and u32(p+12)<=0x110200
     p+=size
-assert identity=='@rpath/XAutoTranslate-v9.dylib'
+assert identity=='@rpath/XAutoTranslate-v10.dylib'
 assert signature and '__objc_imageinfo' in sections and '__objc_nlclslist' in sections
-assert b'XATAppleBootstrapV9' in b and '_XATScheduleInitialization' in symbols
+assert b'XATAppleBootstrapV10' in b and '_XATScheduleInitialization' in symbols
 _,init_size,init_offset=sections['__mod_init_func']
 assert init_size>=8
 assert symbols['_start'] in [u64(init_offset+i) for i in range(0,init_size,8)]
-assert (b'UILongPressGestureRecognizer' in b)==bool(diagnostics)
-assert (b'xadLongPress:' in b)==bool(diagnostics)
-assert b'XAutoTranslate.LogButton.' not in b
-assert b'xadOpenLog:' not in b
+for forbidden in [b'XADLog', b'XADBootstrap', b'XADStart', b'XATDiagnostic',
+                  b'UILongPressGestureRecognizer', b'xadLongPress:',
+                  b'UIActivityViewController', b'XAutoTranslate.LogButton.',
+                  b'xadOpenLog:', b'XAutoTranslate-bootstrap.log', b'statistics']:
+    assert forbidden not in b, forbidden
 sigoff,sigsize=signature
 sig=b[sigoff:sigoff+sigsize]
 assert struct.unpack_from('>I',sig)[0]==0xfade0cc0
@@ -65,8 +65,6 @@ for i in range(struct.unpack_from('>I',sig,8)[0]):
         assert algorithm(data).digest()[:hashsize]==expected
     verified+=1
 assert verified
-print('PASS arm64/iOS dylib: native ObjC +load, C constructor, signature pages, diagnostic configuration')
-print(hashlib.sha256(b).hexdigest(),path.name)
 
 assert b'translate.googleapis.com' in b
 
@@ -74,3 +72,6 @@ assert " 已翻译".encode() not in b
 assert b"setInfo:for:" in b and b"T1TranslatedStatusViewModel" in b
 
 assert b"getOrCreateInfoFor:" in b
+
+print('PASS arm64/iOS clean dylib: native loaders, signature pages, translation bridge, no diagnostics')
+print(hashlib.sha256(b).hexdigest(),path.name)

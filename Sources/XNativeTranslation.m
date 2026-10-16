@@ -1,5 +1,4 @@
 #import "XNativeTranslation.h"
-#include "XDiagnostics.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
 @interface NSObject (XATNativeTranslationAPI)
@@ -37,7 +36,7 @@ XGTXResult *XATNativeResult(id model,id info,NSString *original,NSString *langua
     @try {
         XGTXResult *manual=State(info)==3 ? Result(TranslationFromInfo(info),original,language) : nil;
         return manual ?: Result(Get(model,@"grokTranslatedPost"),original,language);
-    } @catch(NSException *e) {(void)e;XADLog("NATIVE","read exception=%s",e.name.UTF8String);return nil;}
+    } @catch(NSException *e) {(void)e;return nil;}
 }
 BOOL XATNativeMatches(id info,NSString *text) {
     NSInteger state=State(info);
@@ -83,7 +82,7 @@ NSUInteger XATNativePublish(id model,id helper,XGTXResult *result,NSString *orig
         [info setOriginalStatus:model];[info setTranslatedStatus:wrapper];[info setTranslationError:nil];[info setState:3];
         [helper setInfo:info for:model];
         return XATNativeMatches([helper getInfoFor:model],result.text) ? 2 : 0;
-    } @catch(NSException *e) {(void)e;XADLog("NATIVE","publish exception=%s",e.name.UTF8String);return 0;}
+    } @catch(NSException *e) {(void)e;return 0;}
 }
 BOOL XATNativeNotify(id model,NSString *dynamicKey,NSString *animatedKey) {
     NSString *name=Text(Get(model,@"statusItemViewModelDidUpdateNotificationName"));

@@ -17,21 +17,16 @@ jobs:
       - name: Test GTX cache, scheduling and native text factory
         run: |
           mkdir -p build
-          xcrun --sdk macosx clang -fobjc-arc -fobjc-exceptions -fblocks -Wall -Wextra -Werror -ISources tests/EngineTests.m Sources/XGTXEngine.m Sources/XNativeTranslation.m Sources/XTranslationRouter.m -framework Foundation -o build/engine-tests
+          xcrun --sdk macosx clang -fobjc-arc -fobjc-exceptions -fblocks -Wall -Wextra -Werror -DXAT_TESTING=1 -ISources tests/EngineTests.m Sources/XGTXEngine.m Sources/XNativeTranslation.m Sources/XTranslationRouter.m -framework Foundation -o build/engine-tests
           build/engine-tests
       - name: Compile and sign with iPhoneOS SDK
-        run: bash scripts/build-ios.sh
-      - name: Check build without temporary diagnostics
-        env:
-          XAD_DIAGNOSTICS: '0'
-          XAD_OUTPUT_DIR: build/no-diagnostics
         run: bash scripts/build-ios.sh
       - name: Upload verified dylib
         uses: actions/upload-artifact@v4
         with:
-          name: XAutoTranslate-v9-X12.33-${{ github.run_number }}
+          name: XAutoTranslate-v10-X12.33-${{ github.run_number }}
           path: |
-            output/XAutoTranslate-v9.dylib
+            output/XAutoTranslate-v10.dylib
             output/build-info.txt
             output/README.md
           if-no-files-found: error

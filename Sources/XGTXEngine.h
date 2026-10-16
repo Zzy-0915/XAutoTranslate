@@ -27,7 +27,8 @@ FOUNDATION_EXPORT NSArray<NSString *> *XGTXChunks(NSString *text);
 - (void)keepQueuedKeys:(NSSet<NSString *> *)visibleKeys;
 - (void)setEligibleKeys:(nullable NSSet<NSString *> *)keys;
 - (void)pump;
-- (NSDictionary<NSString *,NSNumber *> *)statistics;
+#if XAT_TESTING
 - (void)invalidate;
+#endif
 @end
 NS_ASSUME_NONNULL_END

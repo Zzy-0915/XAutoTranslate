@@ -1,5 +1,4 @@
 #import "XGTXEngine.h"
-#include "XDiagnostics.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <math.h>
 #include <stdio.h>
@@ -78,7 +77,7 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
 @property(nonatomic,strong) NSURLSession *session;
 @property(nonatomic,copy) NSTimeInterval (^clock)(void);
 @property(nonatomic) NSTimeInterval interval,nextStart,cooldown,wakeAt;
-@property(nonatomic) NSUInteger active,requests,hits,joined,throttles,consecutiveThrottles,wakeGeneration;
+@property(nonatomic) NSUInteger active,consecutiveThrottles,wakeGeneration;
 @property(nonatomic) BOOL invalidated,wakeScheduled;
 @end
 @implementation XGTXEngine
@@ -95,7 +94,7 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
     return self;
 }
 - (XGTXResult *)cached:(NSString *)key {
-    [self.lock lock];XGTXResult *result=self.success[key];if(result) self.hits++;[self.lock unlock];return result;
+    [self.lock lock];XGTXResult *result=self.success[key];[self.lock unlock];return result;
 }
 - (void)storeSuccess:(NSString *)key text:(NSString *)text language:(NSString *)language {
     NSAssert(NSThread.isMainThread,@"main-thread scheduler");
@@ -114,9 +113,9 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
 - (void)enqueue:(NSString *)key text:(NSString *)text language:(NSString *)language {
     NSAssert(NSThread.isMainThread,@"main-thread scheduler");
     if(self.invalidated || !text.length || XGTXChinese(language) || (self.eligibleKeys && ![self.eligibleKeys containsObject:key]) || [self cached:key]) return;
-    if(self.jobs[key]) {self.joined++;return;}
+    if(self.jobs[key]) {return;}
     if(self.failedUntil[key].doubleValue>self.clock()) return;
-    if(self.jobs.count>=64) {XADLog("GTX","queue full; visible item deferred");return;}
+    if(self.jobs.count>=64) {return;}
     XGTXJob *job=XGTXJob.new;job.key=key;job.language=language;job.token=@"";job.original=text;
     job.chunks=XGTXChunks(text);job.parts=NSMutableArray.new;
     self.jobs[key]=job;[self.queue addObject:key];[self pump];
@@ -149,11 +148,10 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
     if(!XGTXTranslationChanged(translated,job.original)) {
         for(NSString *chunk in job.chunks) [self.segments removeObjectForKey:XGTXDigest(chunk)];
         self.failedUntil[job.key]=@(self.clock()+60);[self.jobs removeObjectForKey:job.key];
-        XADLog("GTX","unchanged response rejected key=%.12s; not cached or marked translated",job.key.UTF8String);return;
+        return;
     }
     [self storeSuccess:job.key text:[job.parts componentsJoinedByString:@""] language:job.language];
     [self.jobs removeObjectForKey:job.key];[self.failedUntil removeObjectForKey:job.key];
-    XADLog("GTX","success key=%.12s chunks=%lu cacheEntries=%lu",job.key.UTF8String,(unsigned long)job.chunks.count,(unsigned long)self.success.count);
 }
 - (void)pump {
     NSAssert(NSThread.isMainThread,@"main-thread scheduler");
@@ -172,7 +170,7 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
         [self.queue removeObject:job.key];
         if(self.eligibleKeys && ![self.eligibleKeys containsObject:job.key]) {[self.jobs removeObjectForKey:job.key];continue;}
         if(self.admitRequest && !self.admitRequest(job.key)) {
-            [self.jobs removeObjectForKey:job.key];XADLog("FAST","Google start rejected by live visibility gate key=%.12s",job.key.UTF8String);continue;
+            [self.jobs removeObjectForKey:job.key];continue;
         }
         while(job.index<job.chunks.count) {
             XGTXResult *saved=self.segments[XGTXDigest(job.chunks[job.index])];
@@ -187,7 +185,7 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
         url.percentEncodedQuery=[url.percentEncodedQuery stringByReplacingOccurrencesOfString:@"+" withString:@"%2B"];
         NSMutableURLRequest *request=[NSMutableURLRequest requestWithURL:url.URL cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:20];
         [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
-        NSString *token=NSUUID.UUID.UUIDString;job.token=token;self.active++;self.requests++;self.nextStart=now+self.interval;
+        NSString *token=NSUUID.UUID.UUIDString;job.token=token;self.active++;self.nextStart=now+self.interval;
         __weak XGTXEngine *weak=self;
         job.task=[self.session dataTaskWithRequest:request completionHandler:^(NSData *data,NSURLResponse *response,NSError *error) {
             dispatch_async(dispatch_get_main_queue(),^{
@@ -195,7 +193,7 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
                 [s received:job token:token data:data response:response error:error];
             });
         }];
-        XADLog("GTX","request key=%.12s chunk=%lu/%lu active=%lu host=translate.googleapis.com",job.key.UTF8String,(unsigned long)job.index+1,(unsigned long)job.chunks.count,(unsigned long)self.active);
+
         [job.task resume];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,35*NSEC_PER_SEC),dispatch_get_main_queue(),^{
             XGTXEngine *s=weak;
@@ -231,26 +229,24 @@ NSArray<NSString *> *XGTXChunks(NSString *text) {
         job.failures++;
         NSTimeInterval delay=MIN(60,5*pow(2,job.failures-1));
         if(http.statusCode==429 || http.statusCode==503) {
-            self.throttles++;self.consecutiveThrottles++;
+            self.consecutiveThrottles++;
             delay=MAX([self retryAfter:http],MIN(300,15*pow(2,MIN(self.consecutiveThrottles-1,5))));
             self.cooldown=MAX(self.cooldown,self.clock()+delay);
         }
-        XADLog("GTX","failure key=%.12s http=%ld errorDomain=%s errorCode=%ld retry=%lu wait=%.1f",job.key.UTF8String,(long)http.statusCode,error.domain.UTF8String ?: "none",(long)error.code,(unsigned long)job.failures,delay);
+
         if(job.failures<=2) {job.readyAt=self.clock()+delay;[self.queue addObject:job.key];}
         else {self.failedUntil[job.key]=@(self.clock()+60);[self.jobs removeObjectForKey:job.key];}
     }
     [self pump];
 }
-- (NSDictionary<NSString *,NSNumber *> *)statistics {
-    [self.lock lock];NSUInteger count=self.success.count,hits=self.hits;[self.lock unlock];
-    return @{@"cache":@(count),@"hits":@(hits),@"requests":@(self.requests),@"joined":@(self.joined),
-        @"active":@(self.active),@"queued":@(self.queue.count),@"throttles":@(self.throttles),@"cooldown":@(MAX(0,self.cooldown-self.clock()))};
-}
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task willPerformHTTPRedirection:(NSHTTPURLResponse *)response newRequest:(NSURLRequest *)request completionHandler:(void (^)(NSURLRequest * _Nullable))completionHandler {
     (void)session;(void)task;(void)response;
     completionHandler([request.URL.host.lowercaseString isEqual:@"translate.googleapis.com"] && [request.URL.scheme isEqual:@"https"] ? request : nil);
 }
+#if XAT_TESTING
 - (void)invalidate {
     self.invalidated=YES;[self.session invalidateAndCancel];[self.jobs removeAllObjects];[self.queue removeAllObjects];self.didFinish=nil;
 }
+#endif
+
 @end
