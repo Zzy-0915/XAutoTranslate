@@ -89,7 +89,7 @@ void XATStyleCell(UITableViewCell *cell,UILabel *title,UILabel *detail) {
 void XATLayoutCell(UITableViewCell *cell) {
     NSArray<UILabel *> *labels=objc_getAssociatedObject(cell,&layoutKey);if(!labels.count) return;
     UILabel *title=labels[0],*detail=labels.count>1 ? labels[1] : nil;
-    for(UIView *view in cell.contentView.subviews) view.hidden=![labels containsObject:view];
+    for(UIView *view in cell.contentView.subviews) view.hidden=view!=title && view!=detail;
     CGFloat width=MAX(0,cell.contentView.bounds.size.width-40),height=cell.contentView.bounds.size.height;
     XATSingleLine(title,NO,width);XATSingleLine(detail,YES,width);
     CGFloat titleHeight=ceil(title.font.lineHeight),detailHeight=detail.text.length ? ceil(detail.font.lineHeight) : 0;
