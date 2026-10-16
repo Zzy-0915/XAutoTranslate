@@ -1,6 +1,13 @@
 #import "XSettingsAppearance.h"
+#import "XSettingsStyle.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
+
+@interface XATUniformSettingsCell : UITableViewCell
+@end
+@implementation XATUniformSettingsCell
+- (void)layoutSubviews {[super layoutSubviews];XATLayoutCell(self);}
+@end
 
 static void (*originalNavigation)(id,SEL);
 static id Get(id object,NSString *name) {
@@ -12,8 +19,8 @@ static NSArray *Rows(id controller) {
 }
 UITableViewCell *XATSettingsCell(UITableView *table,NSString *identifier) {
     UITableViewCell *cell=[table dequeueReusableCellWithIdentifier:identifier];
-    if(!cell) cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:identifier];
-    cell.textLabel.numberOfLines=0;cell.detailTextLabel.numberOfLines=0;
+    if(!cell) cell=[[XATUniformSettingsCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:identifier];
+    XATStyleCell(cell,cell.textLabel,cell.detailTextLabel);
     cell.accessoryView=nil;cell.accessoryType=UITableViewCellAccessoryNone;cell.imageView.image=nil;
     cell.textLabel.text=nil;cell.detailTextLabel.text=nil;
     return cell;
@@ -23,6 +30,8 @@ static void NavigationLabels(UIView *view) {
         UILabel *label=(UILabel *)view;
         label.text=[label.text stringByReplacingOccurrencesOfString:@"NFB-X" withString:@"Zzy-X"];
         if([label.text containsString:@"Zzy-X"]) label.font=[UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+        else label.font=XATDetailFont();
+        label.numberOfLines=1;
     }
     for(UIView *child in view.subviews) NavigationLabels(child);
 }
@@ -35,7 +44,7 @@ static void SetupTable(UIViewController *controller,SEL selector) {
     (void)selector;
     UITableView *table=[[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
     table.translatesAutoresizingMaskIntoConstraints=NO;table.dataSource=(id<UITableViewDataSource>)controller;table.delegate=(id<UITableViewDelegate>)controller;
-    table.rowHeight=UITableViewAutomaticDimension;table.estimatedRowHeight=60;
+    XATStyleTable(table);
     table.backgroundColor=UIColor.systemGroupedBackgroundColor;
     ((void (*)(id,SEL,id))objc_msgSend)(controller,NSSelectorFromString(@"setTableView:"),table);
     [controller.view addSubview:table];
@@ -43,23 +52,21 @@ static void SetupTable(UIViewController *controller,SEL selector) {
 static void Layout(UIViewController *controller,SEL selector) {
     (void)selector;UITableView *table=Get(controller,@"tableView");
     if(![table isKindOfClass:UITableView.class]) return;
-    [NSLayoutConstraint activateConstraints:@[
-        [table.leadingAnchor constraintEqualToAnchor:controller.view.leadingAnchor],
-        [table.trailingAnchor constraintEqualToAnchor:controller.view.trailingAnchor],
-        [table.topAnchor constraintEqualToAnchor:controller.view.topAnchor],
-        [table.bottomAnchor constraintEqualToAnchor:controller.view.bottomAnchor]]];
+    XATFitTable(controller,table);
 }
 static void NoFooter(id controller,SEL selector) {(void)controller;(void)selector;}
 static NSInteger Sections(id controller,SEL selector,UITableView *table) {(void)controller;(void)selector;(void)table;return 1;}
 static NSInteger Count(id controller,SEL selector,UITableView *table,NSInteger section) {(void)selector;(void)table;return section==0 ? (NSInteger)Rows(controller).count : 0;}
 static UIView *NoSupplement(id controller,SEL selector,UITableView *table,NSInteger section) {(void)controller;(void)selector;(void)table;(void)section;return nil;}
-static CGFloat SupplementHeight(id controller,SEL selector,UITableView *table,NSInteger section) {(void)controller;(void)selector;(void)table;(void)section;return UITableViewAutomaticDimension;}
+static CGFloat SupplementHeight(id controller,SEL selector,UITableView *table,NSInteger section) {(void)controller;(void)selector;(void)table;(void)section;return [NSStringFromSelector(selector) containsString:@"Header"] ? 24 : 8;}
 static UITableViewCell *Cell(id controller,SEL selector,UITableView *table,NSIndexPath *path) {
     (void)selector;UITableViewCell *cell=XATSettingsCell(table,@"XATSettingsNavigation");
     NSArray *rows=Rows(controller);id row=path.row<(NSInteger)rows.count ? rows[path.row] : nil;
     NSDictionary *item=[row isKindOfClass:NSDictionary.class] ? row : @{};
     cell.textLabel.text=[item[@"title"] isKindOfClass:NSString.class] ? item[@"title"] : @"";
     cell.detailTextLabel.text=[item[@"subtitle"] isKindOfClass:NSString.class] ? item[@"subtitle"] : nil;
+    NSDictionary *summaries=@{@"常规功能":@"字体、导航与时间线设置",@"高级功能":@"广告与订阅功能设置",@"推文回复":@"推文外观与回复设置",@"媒体下载":@"媒体下载与上传设置",@"个人资料":@"资料内容与交互设置",@"浏览链接":@"链接与应用内浏览设置",@"标识定义":@"推文显示标识设置",@"实验功能":@"实验性功能设置",@"自动翻译":@"官方优先，Google 失败补位"};
+    if(summaries[cell.textLabel.text]) cell.detailTextLabel.text=summaries[cell.textLabel.text];
     cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;cell.selectionStyle=UITableViewCellSelectionStyleDefault;
     return cell;
 }

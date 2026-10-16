@@ -1,5 +1,6 @@
 #import "XIntegratedPlugin.h"
 #import "XSettingsAppearance.h"
+#import "XSettingsStyle.h"
 #import "XFeatureAppearance.h"
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -18,21 +19,23 @@ BOOL XATTranslationEnabled(void) {
 @end
 @implementation XATTranslationModuleController
 - (instancetype)init {return [super initWithStyle:UITableViewStyleInsetGrouped];}
-- (void)viewDidLoad {[super viewDidLoad];self.title=@"自动翻译";self.tableView.rowHeight=UITableViewAutomaticDimension;self.tableView.estimatedRowHeight=60;}
+- (void)viewDidLoad {[super viewDidLoad];self.title=@"自动翻译";XATStyleTable(self.tableView);}
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)table {(void)table;return 2;}
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {(void)table;return section==0 ? 1 : 3;}
+- (CGFloat)tableView:(UITableView *)table heightForHeaderInSection:(NSInteger)section {(void)table;(void)section;return 24;}
+- (CGFloat)tableView:(UITableView *)table heightForFooterInSection:(NSInteger)section {(void)table;(void)section;return 8;}
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
     (void)table;(void)section;return nil;
 }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
     UITableViewCell *cell=XATSettingsCell(table,@"XATTranslationSetting");
-    cell.selectionStyle=UITableViewCellSelectionStyleNone;cell.textLabel.numberOfLines=0;cell.detailTextLabel.numberOfLines=0;
+    cell.selectionStyle=UITableViewCellSelectionStyleNone;cell.textLabel.numberOfLines=1;cell.detailTextLabel.numberOfLines=1;
     if(path.section==0) {
         cell.textLabel.text=@"自动翻译推文和评论";
         UISwitch *toggle=UISwitch.new;toggle.on=XATTranslationEnabled();[toggle addTarget:self action:@selector(toggle:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=toggle;
     } else {
         NSArray *titles=@[@"翻译通道",@"翻译方式",@"译文显示"];
-        NSArray *details=@[@"官方优先；确认官方失败后 Google GTX 补位，保留冷却与退避。",@"可见内容快速排队；成功结果缓存并去重。",@"使用 X 原生已翻译提示和显示原文功能。"];
+        NSArray *details=@[@"官方失败后 Google GTX 补位",@"快速翻译，成功结果缓存去重",@"原生译文提示与显示原文"];
         cell.textLabel.text=titles[path.row];cell.detailTextLabel.text=details[path.row];
     }return cell;
 }
@@ -102,7 +105,7 @@ void XATPrepareIntegratedPlugin(void) {
         }
         if(!root && [NSBundle.mainBundle URLForResource:@"BHTwitter" withExtension:@"bundle"]) root=NSBundle.mainBundle.bundlePath;
         if(NSClassFromString(@"ModernSettingsViewController") && root) InstallModule(root);
-        else integrationFailure=@"原插件或资源缺失。请移除 v11，并通过注入器导入 v14 完整注入包，不能只导入主 dylib。";
+        else integrationFailure=@"原插件或资源缺失。请移除 v11，并通过注入器导入 v15 完整注入包，不能只导入主 dylib。";
         if(integrationFailure) {
             [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note){(void)note;ShowFailure();}];
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{ShowFailure();});

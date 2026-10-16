@@ -37,9 +37,9 @@ for _ in range(u32(16)):
     elif cmd==0x32:
         assert u32(p+8)==2 and u32(p+12)<=0x110200
     p+=size
-assert identity=='@rpath/XAutoTranslate-v14.dylib'
+assert identity=='@rpath/XAutoTranslate-v15.dylib'
 assert signature and '__objc_imageinfo' in sections and '__objc_nlclslist' in sections
-assert b'XATAppleBootstrapV14' in b and '_XATScheduleInitialization' in symbols
+assert b'XATAppleBootstrapV15' in b and '_XATScheduleInitialization' in symbols
 _,init_size,init_offset=sections['__mod_init_func']
 assert init_size>=8
 assert symbols['_start'] in [u64(init_offset+i) for i in range(0,init_size,8)]

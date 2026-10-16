@@ -1,5 +1,5 @@
 #import "XFeatureAppearance.h"
-#import "XSettingsAppearance.h"
+#import "XSettingsStyle.h"
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -7,15 +7,6 @@
 // Retain the imported controllers, cell classes and actual controls. Their
 // targets, menus, tags, model updates and collection/drag delegates remain native.
 static _Thread_local unsigned tableConstruction;
-static char adaptedKey;
-static UIFont *TitleFont(void) {
-    static UIFont *font;static dispatch_once_t once;
-    dispatch_once(&once,^{font=XATSettingsCell(nil,@"XATFeatureFontReference").textLabel.font;});return font;
-}
-static UIFont *DetailFont(void) {
-    static UIFont *font;static dispatch_once_t once;
-    dispatch_once(&once,^{font=XATSettingsCell(nil,@"XATFeatureFontReference").detailTextLabel.font;});return font;
-}
 @interface UITableView (XATFeatureConstruction)
 - (instancetype)xat_featureInitWithFrame:(CGRect)frame style:(UITableViewStyle)style __attribute__((objc_method_family(init)));
 @end
@@ -38,19 +29,11 @@ static void Fonts(UIView *view,BOOL navigation) {
     if([view isKindOfClass:UILabel.class]) {
         UILabel *label=(UILabel *)view;
         BOOL small=[label.text hasPrefix:@"@"] || !navigation;
-        label.font=small ? DetailFont() : [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+        label.font=small ? XATDetailFont() : [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
         label.textColor=small ? UIColor.secondaryLabelColor : UIColor.labelColor;
-        label.numberOfLines=0;
+        label.numberOfLines=1;
     }
     for(UIView *child in view.subviews) Fonts(child,navigation);
-}
-static void CellFonts(UITableViewCell *cell) {
-    UILabel *title=Get(cell,@"titleLabel"),*subtitle=Get(cell,@"subtitleLabel");
-    if(![title isKindOfClass:UILabel.class]) title=cell.textLabel;
-    if(![subtitle isKindOfClass:UILabel.class]) subtitle=cell.detailTextLabel;
-    title.font=TitleFont();title.numberOfLines=0;title.textColor=UIColor.labelColor;
-    subtitle.font=DetailFont();subtitle.numberOfLines=0;subtitle.textColor=UIColor.secondaryLabelColor;
-    cell.backgroundColor=UIColor.secondarySystemGroupedBackgroundColor;
 }
 static void CollectControls(UIView *view,NSMutableArray<UIView *> *controls) {
     for(UIView *child in view.subviews) {
@@ -60,8 +43,8 @@ static void CollectControls(UIView *view,NSMutableArray<UIView *> *controls) {
 }
 static void AdaptCell(UITableViewCell *cell) {
     UILabel *title=Get(cell,@"titleLabel"),*subtitle=Get(cell,@"subtitleLabel");
-    if(![title isKindOfClass:UILabel.class]) {CellFonts(cell);return;}
-    if(!objc_getAssociatedObject(cell,&adaptedKey)) {
+    if(![title isKindOfClass:UILabel.class]) {XATStyleCell(cell,cell.textLabel,cell.detailTextLabel);return;}
+    if(!XATHasCellLayout(cell)) {
         NSMutableArray<UIView *> *controls=NSMutableArray.new;
         CollectControls(cell.contentView,controls);
         // accessoryView already has native layout; only relocate controls that
@@ -81,39 +64,13 @@ static void AdaptCell(UITableViewCell *cell) {
             }
         }
         BOOL disclosure=[Get(cell,@"chevronImageView") isKindOfClass:UIImageView.class];
-        [title removeFromSuperview];
-        if([subtitle isKindOfClass:UILabel.class]) [subtitle removeFromSuperview];
-        [NSLayoutConstraint deactivateConstraints:cell.contentView.constraints];
-        // Keep old views alive for original configure/theme methods and popover
-        // anchors. They no longer contribute old spacing or custom typography.
-        for(UIView *view in cell.contentView.subviews) view.hidden=YES;
-        UIStackView *labels=[[UIStackView alloc] initWithArrangedSubviews:
-            [subtitle isKindOfClass:UILabel.class] ? @[title,subtitle] : @[title]];
-        labels.axis=UILayoutConstraintAxisVertical;labels.spacing=3;labels.translatesAutoresizingMaskIntoConstraints=NO;
-        title.translatesAutoresizingMaskIntoConstraints=NO;subtitle.translatesAutoresizingMaskIntoConstraints=NO;
-        title.hidden=NO;subtitle.hidden=NO;
-        [cell.contentView addSubview:labels];
-        UILayoutGuide *margin=cell.contentView.layoutMarginsGuide;
-        [NSLayoutConstraint activateConstraints:@[
-            [labels.leadingAnchor constraintEqualToAnchor:margin.leadingAnchor],
-            [labels.trailingAnchor constraintEqualToAnchor:margin.trailingAnchor],
-            [labels.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:12],
-            [labels.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-12],
-            [cell.contentView.heightAnchor constraintGreaterThanOrEqualToConstant:44]]];
         if(!cell.accessoryView && disclosure) cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;
-        objc_setAssociatedObject(cell,&adaptedKey,labels,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    UIView *labels=objc_getAssociatedObject(cell,&adaptedKey);
-    for(UIView *view in cell.contentView.subviews) if(view!=labels) view.hidden=YES;
-    CellFonts(cell);
+    XATStyleCell(cell,title,[subtitle isKindOfClass:UILabel.class] ? subtitle : nil);
 }
 static void StyleTable(UIViewController *controller) {
     UITableView *table=Get(controller,@"tableView");if(![table isKindOfClass:UITableView.class]) return;
-    controller.view.backgroundColor=UIColor.systemGroupedBackgroundColor;
-    table.backgroundColor=UIColor.systemGroupedBackgroundColor;
-    table.rowHeight=UITableViewAutomaticDimension;table.estimatedRowHeight=60;
-    table.separatorStyle=UITableViewCellSeparatorStyleSingleLine;
-    Fonts(table.tableHeaderView,NO);Fonts(table.tableFooterView,NO);
+    XATFitTable(controller,table);
     Fonts(controller.navigationItem.titleView,YES);
 }
 static void InstallList(Class cls) {
@@ -137,30 +94,57 @@ static void InstallList(Class cls) {
         void (*navigation)(id,SEL)=(void *)method_getImplementation(method);
         Replace(cls,nav,imp_implementationWithBlock(^(UIViewController *controller){navigation(controller,nav);Fonts(controller.navigationItem.titleView,YES);}));
     }
-    for(NSString *name in @[@"tableView:viewForHeaderInSection:",@"tableView:viewForFooterInSection:"]) {
-        SEL supplement=NSSelectorFromString(name);method=class_getInstanceMethod(cls,supplement);
-        if(method) {
-            UIView *(*originalSupplement)(id,SEL,id,NSInteger)=(void *)method_getImplementation(method);
-            Replace(cls,supplement,imp_implementationWithBlock(^UIView *(id controller,UITableView *table,NSInteger section){
-                UIView *view=originalSupplement(controller,supplement,table,section);Fonts(view,NO);return view;
-            }));
-        }
+    for(NSString *name in @[@"tableView:viewForHeaderInSection:",@"tableView:viewForFooterInSection:",@"tableView:titleForHeaderInSection:",@"tableView:titleForFooterInSection:"])
+        Replace(cls,NSSelectorFromString(name),imp_implementationWithBlock(^id(id receiver,UITableView *table,NSInteger section){(void)receiver;(void)table;(void)section;return nil;}));
+    for(NSString *name in @[@"tableView:heightForHeaderInSection:",@"tableView:heightForFooterInSection:"]){
+        BOOL header=[name containsString:@"Header"];
+        Replace(cls,NSSelectorFromString(name),imp_implementationWithBlock(^CGFloat(id receiver,UITableView *table,NSInteger section){(void)receiver;(void)table;(void)section;return header ? 24 : 8;}));
     }
     SEL height=@selector(tableView:heightForRowAtIndexPath:);
     if(class_getInstanceMethod(cls,height)) Replace(cls,height,imp_implementationWithBlock(^CGFloat(id receiver,UITableView *table,NSIndexPath *path){
-        (void)receiver;(void)table;(void)path;return UITableViewAutomaticDimension;
+        (void)receiver;(void)table;(void)path;return 60;
     }));
 }
 static void ItemFonts(UIView *view) {
-    if([view isKindOfClass:UILabel.class]) ((UILabel *)view).font=TitleFont();
+    if([view isKindOfClass:UILabel.class]) XATSingleLine((UILabel *)view,NO,view.bounds.size.width);
     for(UIView *child in view.subviews) ItemFonts(child);
+}
+static char gridLayoutKey;
+static void FitGrid(UIViewController *controller,UICollectionView *grid) {
+    if(objc_getAssociatedObject(grid,&gridLayoutKey) || !grid.superview) return;
+    UIView *parent=grid.superview;
+    for(UIView *view=parent;view;view=view.superview) {
+        NSMutableArray *old=NSMutableArray.new;
+        for(NSLayoutConstraint *c in view.constraints) {
+            BOOL first=c.firstItem==grid && (c.firstAttribute==NSLayoutAttributeTop || c.firstAttribute==NSLayoutAttributeLeading || c.firstAttribute==NSLayoutAttributeTrailing || c.firstAttribute==NSLayoutAttributeLeft || c.firstAttribute==NSLayoutAttributeRight || c.firstAttribute==NSLayoutAttributeWidth || c.firstAttribute==NSLayoutAttributeCenterX);
+            BOOL second=c.secondItem==grid && (c.secondAttribute==NSLayoutAttributeTop || c.secondAttribute==NSLayoutAttributeLeading || c.secondAttribute==NSLayoutAttributeTrailing || c.secondAttribute==NSLayoutAttributeLeft || c.secondAttribute==NSLayoutAttributeRight || c.secondAttribute==NSLayoutAttributeWidth || c.secondAttribute==NSLayoutAttributeCenterX);
+            if(first || second) [old addObject:c];
+        }
+        [NSLayoutConstraint deactivateConstraints:old];if(view==controller.view) break;
+    }
+    grid.translatesAutoresizingMaskIntoConstraints=NO;
+    UILayoutGuide *guide=parent==controller.view ? parent.safeAreaLayoutGuide : parent.layoutMarginsGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [grid.leadingAnchor constraintEqualToAnchor:parent.leadingAnchor constant:20],
+        [grid.trailingAnchor constraintEqualToAnchor:parent.trailingAnchor constant:-20],
+        [grid.topAnchor constraintEqualToAnchor:guide.topAnchor constant:24]]];
+    BOOL vertical=NO;
+    for(UIView *view=grid;view;view=view.superview) {
+        for(NSLayoutConstraint *c in view.constraints)
+            if((c.firstItem==grid && (c.firstAttribute==NSLayoutAttributeHeight || c.firstAttribute==NSLayoutAttributeBottom)) ||
+               (c.secondItem==grid && (c.secondAttribute==NSLayoutAttributeHeight || c.secondAttribute==NSLayoutAttributeBottom))) vertical=YES;
+        if(view==controller.view) break;
+    }
+    if(!vertical) [grid.heightAnchor constraintEqualToConstant:MAX(60,grid.bounds.size.height)].active=YES;
+    objc_setAssociatedObject(grid,&gridLayoutKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 static void StyleGrid(UIViewController *controller) {
     controller.view.backgroundColor=UIColor.systemGroupedBackgroundColor;
     Fonts(controller.navigationItem.titleView,YES);
-    UILabel *header=Get(controller,@"headerLabel");if([header isKindOfClass:UILabel.class]) Fonts(header,NO);
+    UILabel *header=Get(controller,@"headerLabel");if([header isKindOfClass:UILabel.class]) {header.hidden=YES;header.text=nil;}
     for(NSString *name in @[@"colorCollectionView",@"collectionView",@"appIconCollectionView"]) {
         UICollectionView *grid=Get(controller,name);if(![grid isKindOfClass:UICollectionView.class]) continue;
+        FitGrid(controller,grid);
         grid.backgroundColor=UIColor.secondarySystemGroupedBackgroundColor;
         grid.layer.cornerRadius=12;grid.clipsToBounds=YES;
         for(UICollectionViewCell *cell in grid.visibleCells) ItemFonts(cell.contentView);
@@ -168,7 +152,7 @@ static void StyleGrid(UIViewController *controller) {
             for(UICollectionReusableView *view in [grid visibleSupplementaryViewsOfKind:kind]) Fonts(view,NO);
     }
     UIButton *restore=Get(controller,@"restoreButton");
-    if([restore isKindOfClass:UIButton.class]) restore.titleLabel.font=TitleFont();
+    if([restore isKindOfClass:UIButton.class]) restore.titleLabel.font=XATTitleFont();
 }
 void XATInstallFeatureAppearance(void) {
     static dispatch_once_t once;dispatch_once(&once,^{
@@ -179,8 +163,8 @@ void XATInstallFeatureAppearance(void) {
             if(!layoutMethod) continue;
             void (*original)(id,SEL)=(void *)method_getImplementation(layoutMethod);
             Replace(cls,layout,imp_implementationWithBlock(^(UITableViewCell *cell){
-                if(objc_getAssociatedObject(cell,&adaptedKey)) CellFonts(cell);
                 original(cell,layout);
+                XATLayoutCell(cell);
             }));
         }
         for(NSString *name in @[@"GeneralSettingsViewController",@"TwitterBlueSettingsViewController",@"TweetsSettingsViewController",@"MediaDownloadsSettingsViewController",@"ProfilesSettingsViewController",@"WebSettingsViewController",@"BrandingSettingsViewController",@"ExperimentalSettingsViewController",@"ModernSettingsPlaceholderViewController"])

@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "XIntegratedPlugin.h"
+#import "XSettingsStyle.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -76,6 +77,7 @@ static NSUInteger featureChanges;
 - (void)setupTable {
     self.tableView=[[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStylePlain];
     self.tableView.delegate=self;self.tableView.dataSource=self;
+    self.tableView.tableHeaderView=[[UIView alloc] initWithFrame:CGRectMake(0,0,300,150)];
     [self.tableView registerClass:ModernSettingsToggleCell.class forCellReuseIdentifier:@"toggle"];
     [self.view addSubview:self.tableView];
 }
@@ -86,6 +88,8 @@ static NSUInteger featureChanges;
 }
 - (void)switchChanged:(UISwitch *)toggle {if(toggle.tag==37) featureChanges++;}
 - (CGFloat)tableView:(UITableView *)table heightForRowAtIndexPath:(NSIndexPath *)path {(void)table;(void)path;return 130;}
+- (UIView *)tableView:(UITableView *)table viewForHeaderInSection:(NSInteger)section {(void)table;(void)section;UILabel *label=UILabel.new;label.text=@"应去除的顶部介绍";return label;}
+- (CGFloat)tableView:(UITableView *)table heightForHeaderInSection:(NSInteger)section {(void)table;(void)section;return 150;}
 @end
 @interface BHCustomTabBarViewController : UIViewController <UICollectionViewDataSource,UICollectionViewDelegate>
 @property(nonatomic,strong) UICollectionView *collectionView;
@@ -103,7 +107,7 @@ static NSUInteger featureChanges;
 - (UICollectionViewCell *)collectionView:(UICollectionView *)grid cellForItemAtIndexPath:(NSIndexPath *)path {return [grid dequeueReusableCellWithReuseIdentifier:@"item" forIndexPath:path];}
 - (void)collectionView:(UICollectionView *)grid didSelectItemAtIndexPath:(NSIndexPath *)path {(void)grid;(void)path;}
 @end
-static void CheckFeatureAppearance(UITableViewCell *reference) {
+static void CheckFeatureAppearance(UITableViewCell *reference,UITableViewCell *mainCell) {
     GeneralSettingsViewController *controller=GeneralSettingsViewController.new;[controller loadViewIfNeeded];
     UITableView *table=controller.tableView;
     Check(table.style==UITableViewStyleInsetGrouped && table.delegate==controller && table.dataSource==controller,"feature grouped table retains original delegates");
@@ -117,14 +121,39 @@ static void CheckFeatureAppearance(UITableViewCell *reference) {
     Check([cell.titleLabel.font.fontDescriptor isEqual:reference.textLabel.font.fontDescriptor] && [cell.subtitleLabel.font.fontDescriptor isEqual:reference.detailTextLabel.font.fontDescriptor],"feature title and detail match translation fonts exactly");
     cell.subtitleLabel.text=@"原控制器更新说明";[cell setNeedsLayout];[cell layoutIfNeeded];
     Check([cell.subtitleLabel.text isEqual:@"原控制器更新说明"] && !cell.subtitleLabel.hidden,"native text updates remain visible");
-    Check([controller tableView:table heightForRowAtIndexPath:path]==UITableViewAutomaticDimension,"old fixed row height removed");
+    Check([controller tableView:table heightForRowAtIndexPath:path]==60 && table.rowHeight==60,"same fixed height on every settings row");
+    Check(!table.tableHeaderView && ![controller tableView:table viewForHeaderInSection:0] && [controller tableView:table heightForHeaderInSection:0]==24,"module introduction removed together with old reserved height");
+    Check(table.sectionFooterHeight==8 && table.sectionHeaderTopPadding==0 && table.separatorInset.left==20,"shared section and horizontal geometry");
+    for(NSNumber *width in @[@260,@320,@430]) {
+        cell.frame=CGRectMake(0,0,width.doubleValue,60);reference.frame=cell.frame;
+        [cell setNeedsLayout];[reference setNeedsLayout];[cell layoutIfNeeded];[reference layoutIfNeeded];
+        Check(cell.titleLabel.numberOfLines==1 && cell.subtitleLabel.numberOfLines==1 && reference.textLabel.numberOfLines==1 && reference.detailTextLabel.numberOfLines==1,"all titles and descriptions use one line");
+        Check(fabs(cell.titleLabel.frame.origin.x-reference.textLabel.frame.origin.x)<0.1 && fabs(cell.titleLabel.frame.origin.y-reference.textLabel.frame.origin.y)<0.1,"feature and translation use identical label geometry");
+        Check(CGRectGetMaxX(cell.subtitleLabel.frame)<=cell.contentView.bounds.size.width-19.9,"description stays clear of original switch");
+    }
+    UILabel *summary=UILabel.new;NSString *original=@"开启此功能后，隐藏广告。此处还有非常长的附加解释内容，应当省略并保持单行。";summary.text=original;
+    XATSingleLine(summary,YES,130);
+    Check([summary.text isEqual:@"隐藏广告"] && summary.numberOfLines==1,"long descriptions reduced to a concise meaningful clause");
+    XATSingleLine(summary,YES,1000);Check([summary.text isEqual:original],"original description retained for a wider layout");
+    summary.text=@"👨‍👩‍👧‍👦家庭功能说明👨‍👩‍👧‍👦家庭功能说明👨‍👩‍👧‍👦家庭功能说明";XATSingleLine(summary,YES,90);
+    Check([summary.text sizeWithAttributes:@{NSFontAttributeName:summary.font}].width<=90 && [summary.text hasSuffix:@"…"],"long unbroken descriptions fit with whole-character abbreviation");
     UITableView *unrelated=[[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     Check(unrelated.style==UITableViewStylePlain,"X tables outside feature setup unaffected");
     BHCustomTabBarViewController *grid=BHCustomTabBarViewController.new;[grid loadViewIfNeeded];[grid viewDidLayoutSubviews];
     Check(grid.collectionView.delegate==grid && grid.collectionView.dataSource==grid && [grid collectionView:grid.collectionView numberOfItemsInSection:0]==4,"layout grid and native selection data retained");
     Check(grid.collectionView.layer.cornerRadius==12 && [grid.collectionView.backgroundColor isEqual:UIColor.secondarySystemGroupedBackgroundColor],"grid rounded card and grouped background");
-    Check([grid.headerLabel.font.fontDescriptor isEqual:reference.detailTextLabel.font.fontDescriptor] && [grid.restoreButton.titleLabel.font.fontDescriptor isEqual:reference.textLabel.font.fontDescriptor],"grid description and action typography");
-    puts("PASS feature settings: retained cell/control identity, callbacks, dynamic labels, scoped table styles, native grid/delegates");
+    Check(grid.headerLabel.hidden && !grid.headerLabel.text && [grid.restoreButton.titleLabel.font.fontDescriptor isEqual:reference.textLabel.font.fontDescriptor],"grid intro removed and action font unified");
+    UIView *preview=[[UIView alloc] initWithFrame:CGRectMake(0,0,390,360)];preview.backgroundColor=UIColor.systemGroupedBackgroundColor;
+    NSArray *cells=@[mainCell,reference,cell],*captions=@[@"Zzy-X 主页",@"自动翻译",@"其他功能模块"];
+    for(NSUInteger i=0;i<cells.count;i++) {
+        UILabel *caption=[[UILabel alloc] initWithFrame:CGRectMake(20,i*110+12,350,20)];caption.text=captions[i];caption.font=XATTitleFont();[preview addSubview:caption];
+        UITableViewCell *item=cells[i];item.frame=CGRectMake(20,i*110+42,350,60);item.layer.cornerRadius=12;item.clipsToBounds=YES;[preview addSubview:item];[item setNeedsLayout];[item layoutIfNeeded];
+    }
+    UIGraphicsImageRenderer *renderer=[[UIGraphicsImageRenderer alloc] initWithSize:preview.bounds.size];
+    UIImage *image=[renderer imageWithActions:^(UIGraphicsImageRendererContext *context){[preview.layer renderInContext:context.CGContext];}];
+    NSString *path=[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject stringByAppendingPathComponent:@"settings-layout-preview.png"];
+    Check([UIImagePNGRepresentation(image) writeToFile:path atomically:YES],"UIKit geometry preview exported");
+    puts("PASS feature settings: unified row/label geometry at three widths, single-line summaries, removed introductions, retained controls and native grid/delegates");
 }
 
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
@@ -163,7 +192,7 @@ static void CheckFeatureAppearance(UITableViewCell *reference) {
     Check(feature.textLabel.font.pointSize==details.textLabel.font.pointSize && [feature.textLabel.font.fontDescriptor isEqual:details.textLabel.font.fontDescriptor],"main and translation titles share font and size");
     Check([feature.detailTextLabel.font.fontDescriptor isEqual:details.detailTextLabel.font.fontDescriptor],"main and translation subtitles share font and size");
     Check(![translation tableView:translation.tableView titleForFooterInSection:0] && ![translation tableView:translation.tableView titleForFooterInSection:1],"both highlighted translation footnotes removed");
-    CheckFeatureAppearance(details);
+    CheckFeatureAppearance(details,feature);
     puts("PASS UIKit settings: grouped layout, shared fonts, all feature rows, original selection/account/lifecycle, Zzy-X branding, removed highlighted regions");fflush(stdout);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(),^{exit(0);});
     });
