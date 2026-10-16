@@ -123,7 +123,7 @@ static void CheckFeatureAppearance(UITableViewCell *reference) {
     BHCustomTabBarViewController *grid=BHCustomTabBarViewController.new;[grid loadViewIfNeeded];[grid viewDidLayoutSubviews];
     Check(grid.collectionView.delegate==grid && grid.collectionView.dataSource==grid && [grid collectionView:grid.collectionView numberOfItemsInSection:0]==4,"layout grid and native selection data retained");
     Check(grid.collectionView.layer.cornerRadius==12 && [grid.collectionView.backgroundColor isEqual:UIColor.secondarySystemGroupedBackgroundColor],"grid rounded card and grouped background");
-    Check(grid.headerLabel.font.pointSize==12 && grid.restoreButton.titleLabel.font.pointSize==17,"grid description and action typography");
+    Check([grid.headerLabel.font.fontDescriptor isEqual:reference.detailTextLabel.font.fontDescriptor] && [grid.restoreButton.titleLabel.font.fontDescriptor isEqual:reference.textLabel.font.fontDescriptor],"grid description and action typography");
     puts("PASS feature settings: retained cell/control identity, callbacks, dynamic labels, scoped table styles, native grid/delegates");
 }
 

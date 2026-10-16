@@ -1,4 +1,5 @@
 #import "XFeatureAppearance.h"
+#import "XSettingsAppearance.h"
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -7,6 +8,14 @@
 // targets, menus, tags, model updates and collection/drag delegates remain native.
 static _Thread_local unsigned tableConstruction;
 static char adaptedKey;
+static UIFont *TitleFont(void) {
+    static UIFont *font;static dispatch_once_t once;
+    dispatch_once(&once,^{font=XATSettingsCell(nil,@"XATFeatureFontReference").textLabel.font;});return font;
+}
+static UIFont *DetailFont(void) {
+    static UIFont *font;static dispatch_once_t once;
+    dispatch_once(&once,^{font=XATSettingsCell(nil,@"XATFeatureFontReference").detailTextLabel.font;});return font;
+}
 @interface UITableView (XATFeatureConstruction)
 - (instancetype)xat_featureInitWithFrame:(CGRect)frame style:(UITableViewStyle)style __attribute__((objc_method_family(init)));
 @end
@@ -29,7 +38,7 @@ static void Fonts(UIView *view,BOOL navigation) {
     if([view isKindOfClass:UILabel.class]) {
         UILabel *label=(UILabel *)view;
         BOOL small=[label.text hasPrefix:@"@"] || !navigation;
-        label.font=[UIFont systemFontOfSize:small ? 12 : 17 weight:navigation && !small ? UIFontWeightSemibold : UIFontWeightRegular];
+        label.font=small ? DetailFont() : [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
         label.textColor=small ? UIColor.secondaryLabelColor : UIColor.labelColor;
         label.numberOfLines=0;
     }
@@ -39,8 +48,8 @@ static void CellFonts(UITableViewCell *cell) {
     UILabel *title=Get(cell,@"titleLabel"),*subtitle=Get(cell,@"subtitleLabel");
     if(![title isKindOfClass:UILabel.class]) title=cell.textLabel;
     if(![subtitle isKindOfClass:UILabel.class]) subtitle=cell.detailTextLabel;
-    title.font=[UIFont systemFontOfSize:17];title.numberOfLines=0;title.textColor=UIColor.labelColor;
-    subtitle.font=[UIFont systemFontOfSize:12];subtitle.numberOfLines=0;subtitle.textColor=UIColor.secondaryLabelColor;
+    title.font=TitleFont();title.numberOfLines=0;title.textColor=UIColor.labelColor;
+    subtitle.font=DetailFont();subtitle.numberOfLines=0;subtitle.textColor=UIColor.secondaryLabelColor;
     cell.backgroundColor=UIColor.secondarySystemGroupedBackgroundColor;
 }
 static void CollectControls(UIView *view,NSMutableArray<UIView *> *controls) {
@@ -143,7 +152,7 @@ static void InstallList(Class cls) {
     }));
 }
 static void ItemFonts(UIView *view) {
-    if([view isKindOfClass:UILabel.class]) ((UILabel *)view).font=[UIFont systemFontOfSize:17];
+    if([view isKindOfClass:UILabel.class]) ((UILabel *)view).font=TitleFont();
     for(UIView *child in view.subviews) ItemFonts(child);
 }
 static void StyleGrid(UIViewController *controller) {
@@ -159,7 +168,7 @@ static void StyleGrid(UIViewController *controller) {
             for(UICollectionReusableView *view in [grid visibleSupplementaryViewsOfKind:kind]) Fonts(view,NO);
     }
     UIButton *restore=Get(controller,@"restoreButton");
-    if([restore isKindOfClass:UIButton.class]) restore.titleLabel.font=[UIFont systemFontOfSize:17];
+    if([restore isKindOfClass:UIButton.class]) restore.titleLabel.font=TitleFont();
 }
 void XATInstallFeatureAppearance(void) {
     static dispatch_once_t once;dispatch_once(&once,^{
