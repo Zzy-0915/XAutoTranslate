@@ -33,8 +33,10 @@ for name,data in files.items():
     path=staging/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(data)
 # Change display branding only; preserve localization keys, feature text and credits.
 for strings in (staging/'BHTwitter.bundle').rglob('*.strings'):
-    content=strings.read_text(encoding='utf-8-sig')
-    strings.write_bytes(content.replace('NFB-X','Zzy-X').encode('utf-8'))
+    raw=strings.read_bytes()
+    encoding='utf-16' if raw.startswith((b'\xff\xfe',b'\xfe\xff')) else 'utf-8-sig' if raw.startswith(b'\xef\xbb\xbf') else 'utf-8'
+    content=raw.decode(encoding)
+    if 'NFB-X' in content:strings.write_bytes(content.replace('NFB-X','Zzy-X').encode(encoding))
 kit=staging/'XATKit.dylib'
 (staging/'libellekit.dylib').rename(kit)
 subprocess.run(['install_name_tool','-id','@rpath/XATKit.dylib',str(kit)],check=True)
@@ -48,3 +50,4 @@ for name in ['XATKit.dylib','libbhFLEX.dylib','BHTwitter.dylib']:
     subprocess.run(['xcrun','lipo',str(path),'-verify_arch','arm64'],check=True)
     files[name]=path.read_bytes()
 print('PASS prepared install-time libraries and bundle:',str(staging))
+
