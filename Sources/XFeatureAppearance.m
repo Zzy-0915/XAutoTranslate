@@ -61,6 +61,8 @@ static void AdaptCell(UITableViewCell *cell) {
             for(UIView *control in controls) {
                 [control removeFromSuperview];control.transform=CGAffineTransformIdentity;
                 control.translatesAutoresizingMaskIntoConstraints=YES;
+                CGSize size=[control sizeThatFits:CGSizeMake(160,44)];
+                if(size.width>0 && size.height>0) control.frame=(CGRect){CGPointZero,size};
             }
             if(controls.count==1) cell.accessoryView=controls.firstObject;
             else {
@@ -140,6 +142,10 @@ static void InstallList(Class cls) {
         (void)receiver;(void)table;(void)path;return UITableViewAutomaticDimension;
     }));
 }
+static void ItemFonts(UIView *view) {
+    if([view isKindOfClass:UILabel.class]) ((UILabel *)view).font=[UIFont systemFontOfSize:17];
+    for(UIView *child in view.subviews) ItemFonts(child);
+}
 static void StyleGrid(UIViewController *controller) {
     controller.view.backgroundColor=UIColor.systemGroupedBackgroundColor;
     Fonts(controller.navigationItem.titleView,YES);
@@ -148,7 +154,7 @@ static void StyleGrid(UIViewController *controller) {
         UICollectionView *grid=Get(controller,name);if(![grid isKindOfClass:UICollectionView.class]) continue;
         grid.backgroundColor=UIColor.secondarySystemGroupedBackgroundColor;
         grid.layer.cornerRadius=12;grid.clipsToBounds=YES;
-        for(UICollectionViewCell *cell in grid.visibleCells) Fonts(cell.contentView,NO);
+        for(UICollectionViewCell *cell in grid.visibleCells) ItemFonts(cell.contentView);
         for(NSString *kind in @[UICollectionElementKindSectionHeader,UICollectionElementKindSectionFooter])
             for(UICollectionReusableView *view in [grid visibleSupplementaryViewsOfKind:kind]) Fonts(view,NO);
     }
