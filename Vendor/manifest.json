@@ -1,0 +1,198 @@
+{
+  "format": 1,
+  "origin": "User-supplied X_12.13_NFB.ipa",
+  "ipa_sha256": "ab812eb5c90441f0af9589f617b34e7555a3b6e6063c476690c889766862ae3f",
+  "archive_sha256": "6f61995078ba6f96922a76c135b820d5bd3474b54e5341aeb2960774a1b20ee9",
+  "parts": [
+    {
+      "path": "nfb-00.b64",
+      "sha256": "6d5ed071f3a4ee2bbc7340d37edb57cdf3be53c22b85e86eb7a34fe835a8457f"
+    },
+    {
+      "path": "nfb-01.b64",
+      "sha256": "427d8bff350f5bbbc55869a8fa7bcaf7bfa383ad5e9ba3485289a5d131e6d8fe"
+    },
+    {
+      "path": "nfb-02.b64",
+      "sha256": "4b6a8a20b212dcdc2b622447169eeb7eabfde0bad011267852e8a35df8004382"
+    },
+    {
+      "path": "nfb-03.b64",
+      "sha256": "a759ebc0b17cb60d54755e1132b67b4565428aaf5fed6ee256be670db2e7104b"
+    },
+    {
+      "path": "nfb-04.b64",
+      "sha256": "f05e2579c167b57a4aa70de2d31e27d972e7f511ae482fd265163effa08caf1f"
+    },
+    {
+      "path": "nfb-05.b64",
+      "sha256": "daa6b7585c9fcbaa779d7c126e74af1a05df4e77276e182e4c38a25601204810"
+    },
+    {
+      "path": "nfb-06.b64",
+      "sha256": "164999076fcf4e7333f65ef2119952a25d32c89baa118f95a72924055cf5833d"
+    },
+    {
+      "path": "nfb-07.b64",
+      "sha256": "d73c66189e8c294680f2f3f0e8b6cd1ae1651e665eef5b25de8abe3f7075b80a"
+    },
+    {
+      "path": "nfb-08.b64",
+      "sha256": "802d60951b38d64dca27fa71d231b14f6ce68b15776dbb8b8439a4814deb019a"
+    },
+    {
+      "path": "nfb-09.b64",
+      "sha256": "98fd47dbf1b682e28bb453a37852c5a5acc525a9815161c3fa7a5af77c0002d7"
+    },
+    {
+      "path": "nfb-10.b64",
+      "sha256": "7fb0300bf5f47805f62c6f7b4887d319730f3728bbd0867ad9dcb75e7a8f23c1"
+    },
+    {
+      "path": "nfb-11.b64",
+      "sha256": "0871fe0487ea07b07e69dfc290f4f255bec9083292b60739fc75a751f2797251"
+    },
+    {
+      "path": "nfb-12.b64",
+      "sha256": "f2f9deeb19966d4c41e79bb037ed318000f739f4e4d3cecef9f054c8628e23a4"
+    },
+    {
+      "path": "nfb-13.b64",
+      "sha256": "9c6df02526aab89f715e301de231fb78a24faa1b6ef168cf42686651246f3713"
+    },
+    {
+      "path": "nfb-14.b64",
+      "sha256": "67639388464ec514355d10a34d4313a2aeb4f415a74b1f50fd3e5c12a667bd34"
+    },
+    {
+      "path": "nfb-15.b64",
+      "sha256": "cf8665bf9306a6652c210a7c85943543c1f1ca7a9581bc6707794607acd6784e"
+    },
+    {
+      "path": "nfb-16.b64",
+      "sha256": "16a38178fe414a6ed8d32652d437ccc807e75c7bb84c5d2b35591e6e83575aeb"
+    },
+    {
+      "path": "nfb-17.b64",
+      "sha256": "bfe604c519e392362c4890a73924cb462cb9ac02e6d68a90d595167eaee343eb"
+    },
+    {
+      "path": "nfb-18.b64",
+      "sha256": "09fe8c260e779cd400922b6f2999d60b185a17d4b1a5b171c1e9c824ed0aa785"
+    },
+    {
+      "path": "nfb-19.b64",
+      "sha256": "70a642767910f8ffbe366256c47ab2508287c1b5bf8d3a06ffb6105fbab42831"
+    },
+    {
+      "path": "nfb-20.b64",
+      "sha256": "2b0c113c924ed222e9b73c774b92291500ae90d9870f6e559f56fd71e83ed8c9"
+    }
+  ],
+  "files": {
+    "BHTwitter.bundle/Acknowledgements.rtf": {
+      "size": 14428,
+      "sha256": "c2ba292090b76599b586193369c9e67cc9fc9b01ad141f9fe2bcbd263e1e3c7c"
+    },
+    "BHTwitter.bundle/BHTWebXTID.js": {
+      "size": 3881,
+      "sha256": "aa2b6d40a403c262035d3e25beee04008b5381391d760c6d0ebd02b23f62bf5d"
+    },
+    "BHTwitter.bundle/Info.plist": {
+      "size": 534,
+      "sha256": "9993301c04bb384996a0b42deff66b866d2718fcc767f5f0eb8d4423971a8992"
+    },
+    "BHTwitter.bundle/SAMKeychain.bundle/en.lproj/SAMKeychain.strings": {
+      "size": 1556,
+      "sha256": "ed77bd9382b5c25788fc4f1a21c0388e30e244401e3efbeecc8ccfc5da52fe9b"
+    },
+    "BHTwitter.bundle/ar.lproj/Localizable.strings": {
+      "size": 33754,
+      "sha256": "e933c8391a80488e39f8c70f26265e1a8760fbdd7c57fa126279da500a2ee628"
+    },
+    "BHTwitter.bundle/de.lproj/Localizable.strings": {
+      "size": 29558,
+      "sha256": "de1c49ee2850576302bb50c473f9d1430c3a3b300100e0c8ba1465c2daa97201"
+    },
+    "BHTwitter.bundle/en.lproj/Localizable.strings": {
+      "size": 26946,
+      "sha256": "6d170d43e10b01dd3abd0c6e27acaee0326c8bcfe35a5edee3e478d162c77323"
+    },
+    "BHTwitter.bundle/es.lproj/Localizable.strings": {
+      "size": 28718,
+      "sha256": "c44ded4696480958585e9b207ddc5652343800c8c8eefa666d95cc2a8a363831"
+    },
+    "BHTwitter.bundle/fr.lproj/Localizable.strings": {
+      "size": 29446,
+      "sha256": "a15b3b04d04ec57d53ae073d11f23c7e097aa4878cdee6c1d2a2aa006d01ccbf"
+    },
+    "BHTwitter.bundle/hr.lproj/Localizable.strings": {
+      "size": 27814,
+      "sha256": "5fe63a8abeeab69258b1fd518d9f839247948cee5acd264285fae212b46d127d"
+    },
+    "BHTwitter.bundle/id.lproj/Localizable.strings": {
+      "size": 27495,
+      "sha256": "bc4780ebf0e412872cf4a88117b0cd6b939ba847927f2926d52a27a0957f0a90"
+    },
+    "BHTwitter.bundle/ja.lproj/Localizable.strings": {
+      "size": 34224,
+      "sha256": "0829c7995d77de25bff739c9e4edd6a1554b762a9e8143e951609da3971948b6"
+    },
+    "BHTwitter.bundle/ko.lproj/Localizable.strings": {
+      "size": 31773,
+      "sha256": "7ad79751ec8206aedffbb446d249a85e044474da7b9bb338b780fa9f38d8e17b"
+    },
+    "BHTwitter.bundle/pl.lproj/Localizable.strings": {
+      "size": 28522,
+      "sha256": "80f5ba9d7001c37bed2a729b16f926ef97b5950b11afdc54274b783c7c2fd6b3"
+    },
+    "BHTwitter.bundle/pop.aac": {
+      "size": 582,
+      "sha256": "c3cc635898f6adb7fc88cc4e0b04ef8b135dc0c31c8c674577dc8c58b19b7dc4"
+    },
+    "BHTwitter.bundle/psst2.aac": {
+      "size": 927,
+      "sha256": "dddaf0b5b5e2c973df57fdb7c5567c15c82933e91ccf2ce0fa2bc9f2fa1b8e2c"
+    },
+    "BHTwitter.bundle/ru.lproj/Localizable.strings": {
+      "size": 36393,
+      "sha256": "92bef78502da4f591d1e4c82bbc626541c8b673108fbeba09209391f6041e687"
+    },
+    "BHTwitter.bundle/sv.lproj/Localizable.strings": {
+      "size": 28288,
+      "sha256": "4a8e5db57d88444db0888423b15a4c29f264a74d2db1379edfb5fd1d47029c25"
+    },
+    "BHTwitter.bundle/tr.lproj/Localizable.strings": {
+      "size": 28712,
+      "sha256": "959bf946e49ef89573c7279b1ec4e3180037ac74a7a24d7b017acb2a836d29cb"
+    },
+    "BHTwitter.bundle/translate.svg": {
+      "size": 1238,
+      "sha256": "f48084dda0d7f619a003589454aba949baa962b175385b6cb16025994d639a01"
+    },
+    "BHTwitter.bundle/uk.lproj/Localizable.strings": {
+      "size": 36798,
+      "sha256": "41e61a433bd5cf2858dec83dd1268418fcc7828425552f841f0adab579f668a4"
+    },
+    "BHTwitter.bundle/zh-Hant.lproj/Localizable.strings": {
+      "size": 26905,
+      "sha256": "36ab0116ec7dd422de55dab58168ec081464b8e3e799a5da43fdb662b199c70e"
+    },
+    "BHTwitter.bundle/zh_CN.lproj/Localizable.strings": {
+      "size": 26769,
+      "sha256": "265317b10e4b968057d2d86457fbb7fcdf54d7aa1f096467452b149285310536"
+    },
+    "BHTwitter.dylib": {
+      "size": 19366128,
+      "sha256": "7d274f2e9dfaebf9242d385bfbeefcc96d84949529c5c44e0e75c1529e98b13c"
+    },
+    "libbhFLEX.dylib": {
+      "size": 2826448,
+      "sha256": "88f4391c71c74c9b5c7e974a652892a01c719645c7b9b64e5db068ee6b722f0e"
+    },
+    "libellekit.dylib": {
+      "size": 347968,
+      "sha256": "85131e920f57ff8613d7e91d1cf8089c19525b25a4f0672bc84dab87bc4a7cff"
+    }
+  }
+}

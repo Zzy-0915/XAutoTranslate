@@ -1,25 +1,25 @@
-# XAutoTranslate v10
+# XAutoTranslate v11 + NFB/BHTwitter
 
-基于已验证的 v9 精简，适用于 X 12.33（31）、iOS 17.2 及以上 arm64 设备。
+面向 X 12.33（31）、iOS 17.2 及以上 arm64 越狱设备的单文件注入整合版。
 
-完整删除日志记录、日志文件、实时日志与导出界面、双指长按入口、诊断统计及仅供诊断使用的字段。保留 v9 的翻译与安全保护逻辑。
+从用户提供的 X_12.13_NFB.ipa 提取 BHTwitter、ElleKit、FLEX 的 arm64 代码及 BHTwitter.bundle。保留第三方原编译代码和资源，通过统一加载器封装在一个 dylib 中；不声称恢复或重新编译了第三方源码。单个 dylib 内是压缩后的已签名依赖与资源，不是将不同动态库直接拼接成一个 Mach-O 镜像。
 
-## 翻译行为
+## 使用
 
-- 可见推文和评论快速进入翻译队列，不要求停稳；中文与无语言内容跳过。
-- 优先使用 X 原生翻译，仅确认原生失败状态（state=2）后启用 Google GTX。排队、超时、不可用状态及无效译文不直接触发 Google。
-- 官方真实失败后进入 300 秒冷却，冷却期间使用 Google；之后尝试官方，连续失败冷却最高 900 秒。
-- 官方最多同时 1 个请求，启动间隔 1.5 秒；Google 最多同时 1 个请求，间隔 1 秒，保留重试与 429/Retry-After 退避。
-- 成功译文保存在进程内存，重复浏览直接复用；退出进程后清空。保留请求去重、可见性检查和长文分段缓存。
-- 继续使用 X 原生译文模型、已翻译提示与显示原文功能，不添加自定义正文标签。
-- 使用原生 getOrCreateInfoFor: 工厂，避免直接初始化 Swift 翻译状态导致崩溃；保留双加载入口及原子去重保护。
+删除旧版 XAutoTranslate 与另行注入的 BHTwitter/NFB，然后彻底退出 X，在 JailFools 中只注入 XAutoTranslate-v11.dylib。不要同时安装 v9/v10/v11。
 
-Google 补位会将待翻译文本发送至 translate.googleapis.com，不发送 X 的凭证。GTX 是非正式接口，可能限流或不可用，并非免限流服务。
+首次启动会把内置依赖释放至应用容器 Library/Application Support/XAutoTranslate/Integrated/<内容摘要>/，后续校验后复用，不需要联网下载依赖。保留签名并按 ElleKit、FLEX、BHTwitter 的顺序加载；BHTwitter 的 ElleKit 路径改为 @loader_path。iOS 必须允许加载这些临时签名的嵌入库；单文件注入成功不等于内层 dlopen 必定获准。加载失败会显示一次错误提示，独立自动翻译仍尝试启动。
 
-## 构建
+打开原插件设置，在功能列表中选择“自动翻译”。默认开启；修改总开关后完全退出并重开 X。关闭时不安装自动翻译 hooks。启用时关闭原插件另一个自定义 API 翻译入口，避免两个翻译器竞争。
 
-GitHub Actions 在 macOS 使用 Apple iPhoneOS SDK 编译、临时签名并验证 dylib。构建前通过模拟服务器测试缓存、去重、限流退避、双通道路由及原生模型工厂；不消耗线上翻译额度。离线检查确认 Mach-O 架构、加载入口、签名页哈希、原生桥接及无日志模块。
+自动翻译保留 v10 行为：可见推文和评论快速排队、中文跳过、官方优先、确认官方失败后 Google GTX 补位、成功译文进程缓存、去重、并发限制、冷却与重试退避，使用 X 原生译文提示。不增加翻译日志、导出或手势模块。第三方原插件自带的调试功能与输出未修改。
 
-运行 `make` 或 `bash scripts/build-ios.sh`。产物位于 output。测试专用 session 清理方法仅在 XAT_TESTING 下编译，不进入发布 dylib。tests 和构建验证脚本不注入 X。
+Google 补位会将待翻译文本发送至 translate.googleapis.com，不发送 X 凭证；非正式 GTX 接口可能限流或不可用。
 
-安装前移除旧版 dylib，彻底退出 X 后再通过 JailFools 注入，避免多版本重复加载。编译及离线校验不等于本版本已完成手机实测。
+## 来源与验证范围
+
+Vendor/manifest.json 记录原 IPA 摘要、归档和每个文件的摘要。Vendor/*.b64 是按顺序分片的 ZIP 编码，构建严格验证并还原。保留原 BHTwitter.bundle/Acknowledgements.rtf 与原作者界面信息。IPA 中的 zxPluginsInject 和 sideloadFixerLol 是安装/侧载辅助库，不并入功能插件，避免改动正常越狱 X 的签名与身份处理。此仓库只编译自有加载器、设置桥接和自动翻译源码，第三方库保留已编译字节，仅修正依赖路径并重新临时签名。
+
+GitHub Actions 使用 Apple iPhoneOS SDK 编译签名，运行模拟翻译回归、资源完整性、嵌套签名页哈希及加载依赖检查。单文件可独立解析出全部内置依赖。原插件取自 X 12.13，不能凭静态检查保证全部原功能兼容 X 12.33；本整合版仍需在设备上验证原插件功能、设置入口、动态库加载权限和自动翻译共存。
+
+构建：make 或 bash scripts/build-ios.sh；产物位于 output。tests、分片与脚本不会作为独立文件交给用户注入。

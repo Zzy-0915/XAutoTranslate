@@ -14,6 +14,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Verify extracted vendor payload
+        run: python3 scripts/vendor-payload.py --verify-only
       - name: Test GTX cache, scheduling and native text factory
         run: |
           mkdir -p build
@@ -24,9 +26,9 @@ jobs:
       - name: Upload verified dylib
         uses: actions/upload-artifact@v4
         with:
-          name: XAutoTranslate-v10-X12.33-${{ github.run_number }}
+          name: XAutoTranslate-v11-X12.33-${{ github.run_number }}
           path: |
-            output/XAutoTranslate-v10.dylib
+            output/XAutoTranslate-v11.dylib
             output/build-info.txt
             output/README.md
           if-no-files-found: error

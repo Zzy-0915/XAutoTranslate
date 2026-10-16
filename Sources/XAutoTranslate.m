@@ -9,6 +9,7 @@
 #import "XGTXEngine.h"
 #import "XNativeTranslation.h"
 #import "XTranslationRouter.h"
+#import "XIntegratedPlugin.h"
 
 @interface NSObject (XATNativeEvent)
 - (instancetype)initWithEventType:(id)type statusView:(id)view sourceView:(id)source;
@@ -208,6 +209,8 @@ static void Install(void) {
     if(![bundle.bundleIdentifier isEqual:@"com.atebits.Tweetie2"] || ![[bundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] isEqual:@"12.33"] || ![[bundle objectForInfoDictionaryKey:@"CFBundleVersion"] isEqual:@"31"]) {
         return;
     }
+    XATPrepareIntegratedPlugin();
+    if(!XATTranslationEnabled()) {installed=YES;return;}
     statusClass=NSClassFromString(@"TFNTwitterStatus");
     if(!statusClass || !NSClassFromString(@"T1TranslatedStatusViewModel") || !NSClassFromString(@"TFSTwitterTranslation")) {
         Retry();return;
